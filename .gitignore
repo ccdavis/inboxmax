@@ -1,0 +1,29 @@
+# Rust
+server/target/
+server/data/
+
+# Node
+client/node_modules/
+client/dist/
+e2e/node_modules/
+
+# E2E test artifacts
+e2e/test-results/
+e2e/playwright-report/
+e2e/screenshots/
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# SQLite test databases
+*.test.db
+*.test.db-shm
+*.test.db-wal
+server/inboxmax_test.db*
+
+# Misc
+*.png
