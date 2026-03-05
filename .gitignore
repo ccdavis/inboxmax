@@ -27,3 +27,4 @@ server/inboxmax_test.db*
 
 # Misc
 *.png
+!docs/**/*.png

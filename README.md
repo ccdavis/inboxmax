@@ -4,6 +4,10 @@ An email client for people who scan subject lines. Shows emails since you last o
 
 Works with any IMAP provider (Gmail, Outlook, Yahoo, etc.).
 
+![Landing page](docs/landing.png)
+
+![Inbox view](docs/inbox.png)
+
 ## Prerequisites
 
 - [Rust](https://rustup.rs/) (stable)
@@ -49,6 +53,19 @@ Note: for the dev proxy to work, re-add this to `client/vite.config.js`:
 server: {
   proxy: { '/api': 'http://localhost:3001' },
 },
+```
+
+## Tests
+
+```bash
+# Server unit + integration tests
+cd server && cargo test
+
+# Client unit tests
+cd client && npm test
+
+# End-to-end tests (requires running server)
+cd e2e && npx playwright test
 ```
 
 ## Configuration
