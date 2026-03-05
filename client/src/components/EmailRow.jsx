@@ -43,9 +43,9 @@ export default function EmailRow({ email, onClick, isRemembered, onToggleRemembe
       onClick={() => onClick?.(email)}
       className={`flex items-center gap-2.5 px-3 py-2 cursor-pointer border-b transition group ${
         isWatermark
-          ? 'border-l-4 border-l-indigo-400 border-b-indigo-200 bg-indigo-50/50 hover:bg-indigo-50/80'
+          ? 'border-l-4 border-l-indigo-500 border-b-[3px] border-b-indigo-400 bg-indigo-50 hover:bg-indigo-100/80'
           : isSeen
-          ? 'bg-slate-50/60 border-slate-100 hover:bg-blue-50/60'
+          ? 'bg-gray-100 border-slate-200 hover:bg-gray-200/70'
           : 'border-slate-100 hover:bg-blue-50/60'
       }`}
     >
@@ -55,11 +55,11 @@ export default function EmailRow({ email, onClick, isRemembered, onToggleRemembe
 
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-1.5">
-          <span className="font-semibold text-xs text-slate-900 truncate">
+          <span className={`text-xs truncate ${isSeen ? 'font-medium text-slate-500' : 'font-semibold text-slate-900'}`}>
             {email.from?.split('<')[0]?.trim() || 'Unknown'}
           </span>
         </div>
-        <div className="text-xs text-slate-600 truncate">
+        <div className={`text-xs truncate ${isSeen ? 'text-slate-400' : 'text-slate-600'}`}>
           {email.subject || '(no subject)'}
         </div>
       </div>
