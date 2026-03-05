@@ -41,15 +41,15 @@ export default function EmailRow({ email, onClick, isRemembered, onToggleRemembe
     <div
       data-uid={email.uid}
       onClick={() => onClick?.(email)}
-      className={`flex items-center gap-2.5 px-3 py-2 cursor-pointer border-b transition group ${
+      className={`flex items-center gap-2.5 py-2 cursor-pointer border-b transition group ${
         isWatermark
-          ? 'border-l-4 border-l-indigo-500 border-b-[3px] border-b-indigo-400 bg-indigo-50 hover:bg-indigo-100/80'
+          ? 'pl-2 border-l-4 border-l-indigo-500 border-b-[3px] border-b-indigo-400 bg-indigo-100 hover:bg-indigo-200/70 pr-3'
           : isSeen
-          ? 'bg-gray-100 border-slate-200 hover:bg-gray-200/70'
-          : 'border-slate-100 hover:bg-blue-50/60'
+          ? 'px-3 bg-stone-200/80 border-stone-300/60 hover:bg-stone-200'
+          : 'pl-2 pr-3 border-l-[3px] border-l-indigo-400 border-b-slate-100 hover:bg-blue-50/60'
       }`}
     >
-      <div className={`${color} w-7 h-7 rounded-full flex items-center justify-center text-white text-xs font-semibold shrink-0`}>
+      <div className={`${color} w-7 h-7 rounded-full flex items-center justify-center text-white text-xs font-semibold shrink-0 ${isSeen ? 'opacity-40' : ''}`}>
         {initial}
       </div>
 
