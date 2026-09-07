@@ -1,10 +1,14 @@
 const BASE = '';
 
 async function request(path, options = {}) {
+  const headers = { ...options.headers };
+  if (options.body && !headers['Content-Type']) {
+    headers['Content-Type'] = 'application/json';
+  }
   const res = await fetch(`${BASE}${path}`, {
     credentials: 'include',
-    headers: { 'Content-Type': 'application/json', ...options.headers },
     ...options,
+    headers,
   });
   if (!res.ok) {
     let message;

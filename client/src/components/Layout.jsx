@@ -1,6 +1,6 @@
 import { useState } from 'react';
 
-export default function Layout({ email, displayName, onLogout, sidebar, children }) {
+export default function Layout({ email, onLogout, notice, sidebar, children }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   return (
@@ -35,6 +35,12 @@ export default function Layout({ email, displayName, onLogout, sidebar, children
           </button>
         </div>
       </header>
+
+      {notice && (
+        <div role="alert" className="bg-red-50 text-red-700 text-sm px-4 py-2 border-b border-red-100">
+          {notice}
+        </div>
+      )}
 
       {/* Body */}
       <div className="flex flex-1 overflow-hidden relative">

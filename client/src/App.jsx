@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import * as api from './api';
 import LandingPage from './components/LandingPage';
@@ -12,80 +12,79 @@ import EmailReader from './components/EmailReader';
 import { useEmails } from './hooks/useEmails';
 import { useRemembered } from './hooks/useRemembered';
 
-function InboxPage({ user, imapStatus, onSignOut }) {
+function InboxPage({ imapStatus, onSignOut }) {
   const [imapEmail, setImapEmail] = useState(imapStatus?.imap_email || null);
   const [checkingImap, setCheckingImap] = useState(!imapStatus);
   const [selectedUid, setSelectedUid] = useState(null);
   const [searchMode, setSearchMode] = useState(false);
   const [hideSeen, setHideSeen] = useState(false);
+  const [signOutError, setSignOutError] = useState(null);
 
-  const { emails, loading, refreshing, error, lastOpen, sinceTimestamp, watermarkUid, saveWatermark, fetchEmails, search } = useEmails();
-  const { remembered, remember, forget, isRemembered } = useRemembered();
-
-  // Keep refs for the visibilitychange handler (avoids stale closures)
-  const emailsRef = useRef(emails);
-  const saveWatermarkRef = useRef(saveWatermark);
-  emailsRef.current = emails;
-  saveWatermarkRef.current = saveWatermark;
+  const {
+    emails, searchResults, loading, refreshing, error, lastOpen, watermarkUid,
+    saveWatermark, fetchEmails, search, clearSearch, clearStoredSince,
+  } = useEmails(imapEmail);
+  const {
+    remembered, remember, forget, isRemembered, fetchRemembered,
+    error: rememberedError,
+  } = useRemembered();
 
   useEffect(() => {
     if (imapStatus) {
       if (imapStatus.imap_connected) {
-        setImapEmail(imapStatus.imap_email);
-        fetchEmails();
+        fetchEmails(undefined, imapStatus.imap_email);
       }
-      setCheckingImap(false);
     } else {
       api.getStatus()
         .then((s) => {
           if (s.imap_connected) {
             setImapEmail(s.imap_email);
-            fetchEmails();
+            fetchEmails(undefined, s.imap_email);
           }
         })
         .catch(() => {})
         .finally(() => setCheckingImap(false));
     }
-  }, []);
+  }, [fetchEmails, imapStatus]);
 
   // Auto-save watermark when user tabs away or leaves
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') {
-        const currentEmails = emailsRef.current;
-        if (currentEmails.length > 0) {
-          saveWatermarkRef.current(currentEmails[0].uid);
+      if (document.visibilityState === 'hidden' && !searchMode) {
+        if (emails.length > 0) {
+          saveWatermark(emails[0].uid);
         }
       }
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, []);
+  }, [emails, saveWatermark, searchMode]);
 
   // Poll for new emails every 2 minutes when tab is visible
-  const fetchEmailsRef = useRef(fetchEmails);
-  fetchEmailsRef.current = fetchEmails;
   useEffect(() => {
     if (!imapEmail) return;
     const id = setInterval(() => {
       if (document.visibilityState === 'visible') {
-        fetchEmailsRef.current();
+        fetchEmails(undefined, imapEmail);
       }
     }, 2 * 60 * 1000);
     return () => clearInterval(id);
-  }, [imapEmail]);
+  }, [fetchEmails, imapEmail]);
 
-  const handleConnect = (email) => {
+  const handleConnect = async (email) => {
     setImapEmail(email);
-    fetchEmails();
+    await fetchEmails(undefined, email);
+    await fetchRemembered();
   };
 
   const handleLogout = async () => {
     try {
       await api.signout();
-    } catch {
-      // Still clear local state even if API fails
+    } catch (caught) {
+      setSignOutError(`Could not sign out: ${caught.message}`);
+      return;
     }
+    clearStoredSince();
     onSignOut();
   };
 
@@ -102,7 +101,8 @@ function InboxPage({ user, imapStatus, onSignOut }) {
   const handleClearSearch = () => {
     setSearchMode(false);
     setSelectedUid(null);
-    fetchEmails();
+    clearSearch();
+    fetchEmails(undefined, imapEmail);
   };
 
   const handleToggleRemember = async (email) => {
@@ -116,6 +116,8 @@ function InboxPage({ user, imapStatus, onSignOut }) {
   const handleSetWatermark = useCallback((uid) => {
     saveWatermark(uid);
   }, [saveWatermark]);
+
+  const displayedEmails = searchMode ? searchResults : emails;
 
   if (checkingImap) {
     return (
@@ -132,11 +134,11 @@ function InboxPage({ user, imapStatus, onSignOut }) {
   return (
     <Layout
       email={imapEmail}
-      displayName={user?.display_name}
       onLogout={handleLogout}
+      notice={signOutError}
       sidebar={
         <SidePanel
-          emails={emails}
+          emails={displayedEmails}
           remembered={remembered}
           onSearch={handleSearch}
           onClearSearch={handleClearSearch}
@@ -150,12 +152,11 @@ function InboxPage({ user, imapStatus, onSignOut }) {
         <EmailReader emailUid={selectedUid} onBack={handleBack} />
       ) : (
         <EmailList
-          emails={emails}
+          emails={displayedEmails}
           loading={loading}
           refreshing={refreshing}
-          error={error}
+          error={error || rememberedError}
           lastOpen={lastOpen}
-          sinceTimestamp={sinceTimestamp}
           onSelectEmail={handleSelectEmail}
           isRemembered={isRemembered}
           onToggleRemember={handleToggleRemember}
@@ -164,7 +165,7 @@ function InboxPage({ user, imapStatus, onSignOut }) {
           onSetWatermark={handleSetWatermark}
           hideSeen={hideSeen}
           onToggleHideSeen={() => setHideSeen(h => !h)}
-          onRefresh={fetchEmails}
+          onRefresh={() => fetchEmails(undefined, imapEmail)}
         />
       )}
     </Layout>
@@ -247,7 +248,7 @@ function App() {
         path="/inbox"
         element={
           <RequireAuth user={user}>
-            <InboxPage user={user} imapStatus={imapStatus} onSignOut={handleSignOut} />
+            <InboxPage imapStatus={imapStatus} onSignOut={handleSignOut} />
           </RequireAuth>
         }
       />

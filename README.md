@@ -2,7 +2,8 @@
 
 An email client for people who scan subject lines. Shows emails since you last opened the app, with a "remember this" bookmark feature.
 
-Works with any IMAP provider (Gmail, Outlook, Yahoo, etc.).
+Works with IMAP providers that support password or app-password authentication
+(Gmail, Outlook, Yahoo, and others).
 
 ![Landing page](docs/landing.png)
 
@@ -47,14 +48,6 @@ cd server && cargo run
 cd client && npm run dev
 ```
 
-Note: for the dev proxy to work, re-add this to `client/vite.config.js`:
-
-```js
-server: {
-  proxy: { '/api': 'http://localhost:3001' },
-},
-```
-
 ## Tests
 
 ```bash
@@ -64,7 +57,8 @@ cd server && cargo test
 # Client unit tests
 cd client && npm test
 
-# End-to-end tests (requires running server)
+# End-to-end tests (Playwright starts the server; build the client first)
+cd client && npm run build
 cd e2e && npx playwright test
 ```
 
@@ -75,3 +69,7 @@ cd e2e && npx playwright test
 | `PORT` | `3001` | Server port |
 | `DATABASE_URL` | `sqlite:data/inboxmax.db` | SQLite database path |
 | `STATIC_DIR` | `../client/dist` | Path to built frontend |
+| `COOKIE_SECURE` | `false` | Set to `true` when serving through HTTPS |
+
+For safety, custom IMAP hosts must resolve to public IP addresses. Private,
+loopback, link-local, and special-use network ranges are rejected.

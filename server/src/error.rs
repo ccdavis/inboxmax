@@ -16,9 +16,6 @@ pub enum AppError {
     #[error("IMAP error: {0}")]
     Imap(String),
 
-    #[error("SMTP error: {0}")]
-    Smtp(String),
-
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 
@@ -33,7 +30,6 @@ impl IntoResponse for AppError {
             AppError::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),
             AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             AppError::Imap(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
-            AppError::Smtp(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             AppError::Database(_) => {
                 tracing::error!("Database error: {self}");
                 (

@@ -1,10 +1,31 @@
 import { useState, useCallback, useRef } from 'react';
 import * as api from '../api';
 
-const SINCE_KEY = 'inboxmax_since';
+const SINCE_PREFIX = 'inboxmax_since:';
+const MAX_STORED_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
-export function useEmails() {
+function storageKey(accountKey) {
+  return accountKey ? `${SINCE_PREFIX}${accountKey.trim().toLowerCase()}` : null;
+}
+
+function readStoredSince(key) {
+  if (!key) return undefined;
+  try {
+    const value = Number(sessionStorage.getItem(key));
+    const now = Date.now();
+    if (Number.isFinite(value) && value > 0 && value <= now && value >= now - MAX_STORED_WINDOW_MS) {
+      return value;
+    }
+    sessionStorage.removeItem(key);
+  } catch {
+    // Storage can be disabled; the in-memory cursor still works.
+  }
+  return undefined;
+}
+
+export function useEmails(accountKey) {
   const [emails, setEmails] = useState([]);
+  const [searchResults, setSearchResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
@@ -12,67 +33,107 @@ export function useEmails() {
   const [lastOpen, setLastOpen] = useState(null);
   const [watermarkUid, setWatermarkUid] = useState(null);
 
-  const emailsRef = useRef(emails);
-  emailsRef.current = emails;
-  const sinceRef = useRef(null);
+  const emailsRef = useRef([]);
+  const cursorRef = useRef({ accountKey: null, since: null });
+  const watermarkQueueRef = useRef(Promise.resolve());
+  const fetchRequestRef = useRef(0);
+  const searchRequestRef = useRef(0);
 
-  const fetchEmails = useCallback(async (since) => {
-    // On refreshes / returning to the page, reuse the stored since so
-    // we keep showing the same window of emails.
-    const effectiveSince = since ?? sinceRef.current
-      ?? (sessionStorage.getItem(SINCE_KEY) ? Number(sessionStorage.getItem(SINCE_KEY)) : undefined);
+  const fetchEmails = useCallback(async (since, accountOverride) => {
+    const requestId = ++fetchRequestRef.current;
+    const scope = accountOverride;
+    const key = storageKey(scope);
+    if (cursorRef.current.accountKey !== scope) {
+      cursorRef.current = { accountKey: scope, since: null };
+    }
+    const effectiveSince = since ?? cursorRef.current.since ?? readStoredSince(key);
 
     const isRefresh = emailsRef.current.length > 0;
-    if (isRefresh) {
-      setRefreshing(true);
-    } else {
-      setLoading(true);
-    }
+    isRefresh ? setRefreshing(true) : setLoading(true);
     setError(null);
     try {
       const data = await api.getEmails(effectiveSince);
+      if (requestId !== fetchRequestRef.current) return;
+      emailsRef.current = data.emails;
       setEmails(data.emails);
       setSinceTimestamp(data.since_timestamp);
       setLastOpen(data.last_open);
-      // Persist the since_timestamp so subsequent fetches (including after
-      // navigation away + back) use the same window.
-      sinceRef.current = data.since_timestamp;
-      try { sessionStorage.setItem(SINCE_KEY, String(data.since_timestamp)); } catch {}
-      if (data.watermark_uid != null) {
-        setWatermarkUid(data.watermark_uid);
+      cursorRef.current = { accountKey: scope, since: data.since_timestamp };
+      if (key) {
+        try {
+          sessionStorage.setItem(key, String(data.since_timestamp));
+        } catch {
+          // Storage is an optional optimization.
+        }
       }
-    } catch (e) {
-      if (!isRefresh) setError(e.message);
+      setWatermarkUid(data.watermark_uid ?? null);
+    } catch (caught) {
+      if (requestId === fetchRequestRef.current) setError(caught.message);
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (requestId === fetchRequestRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, []);
 
-  const saveWatermark = useCallback(async (uid) => {
-    if (uid == null) return;
+  const saveWatermark = useCallback((uid) => {
+    if (uid == null) return Promise.resolve();
     setWatermarkUid(uid);
-    try {
-      await api.setWatermark(uid);
-    } catch {
-      // Best-effort — local state is already updated
-    }
+    const save = watermarkQueueRef.current
+      .catch(() => undefined)
+      .then(() => api.setWatermark(uid));
+    watermarkQueueRef.current = save;
+    return save.catch((caught) => {
+      setError(`Could not save the last-seen marker: ${caught.message}`);
+    });
   }, []);
 
   const search = useCallback(async (query) => {
+    const requestId = ++searchRequestRef.current;
     setLoading(true);
     setError(null);
     try {
-      const data = await api.searchEmails(query);
-      setEmails(data);
-      setSinceTimestamp(null);
-      setLastOpen(null);
-    } catch (e) {
-      setError(e.message);
+      const results = await api.searchEmails(query);
+      if (requestId === searchRequestRef.current) setSearchResults(results);
+    } catch (caught) {
+      if (requestId === searchRequestRef.current) setError(caught.message);
     } finally {
-      setLoading(false);
+      if (requestId === searchRequestRef.current) setLoading(false);
     }
   }, []);
 
-  return { emails, loading, refreshing, error, sinceTimestamp, lastOpen, watermarkUid, saveWatermark, fetchEmails, search };
+  const clearSearch = useCallback(() => {
+    searchRequestRef.current += 1;
+    setSearchResults([]);
+    setLoading(false);
+  }, []);
+
+  const clearStoredSince = useCallback(() => {
+    const key = storageKey(accountKey);
+    if (key) {
+      try {
+        sessionStorage.removeItem(key);
+      } catch {
+        // Storage is optional.
+      }
+    }
+    cursorRef.current = { accountKey: null, since: null };
+  }, [accountKey]);
+
+  return {
+    emails,
+    searchResults,
+    loading,
+    refreshing,
+    error,
+    sinceTimestamp,
+    lastOpen,
+    watermarkUid,
+    saveWatermark,
+    fetchEmails,
+    search,
+    clearSearch,
+    clearStoredSince,
+  };
 }

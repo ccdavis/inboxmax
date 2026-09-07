@@ -8,7 +8,6 @@ export default function ConnectAccount({ onConnect }) {
   const [loading, setLoading] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [imapHost, setImapHost] = useState('');
-  const [smtpHost, setSmtpHost] = useState('');
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -17,7 +16,6 @@ export default function ConnectAccount({ onConnect }) {
     try {
       const overrides = {};
       if (imapHost) overrides.imap_host = imapHost;
-      if (smtpHost) overrides.smtp_host = smtpHost;
       const result = await api.connect(email, password, overrides);
       onConnect(result.email);
     } catch (err) {
@@ -98,18 +96,6 @@ export default function ConnectAccount({ onConnect }) {
                   value={imapHost}
                   onChange={(e) => setImapHost(e.target.value)}
                   placeholder="imap.gmail.com"
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-500 mb-1">
-                  SMTP Host (auto-detected if blank)
-                </label>
-                <input
-                  type="text"
-                  value={smtpHost}
-                  onChange={(e) => setSmtpHost(e.target.value)}
-                  placeholder="smtp.gmail.com"
                   className="w-full px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition"
                 />
               </div>

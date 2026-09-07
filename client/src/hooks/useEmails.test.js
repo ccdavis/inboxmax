@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useEmails } from './useEmails';
 
-// Mock the api module
 vi.mock('../api', () => ({
   getEmails: vi.fn(),
   setWatermark: vi.fn(),
@@ -11,7 +10,8 @@ vi.mock('../api', () => ({
 
 import * as api from '../api';
 
-const SINCE_KEY = 'inboxmax_since';
+const ACCOUNT = 'test@example.com';
+const SINCE_KEY = `inboxmax_since:${ACCOUNT}`;
 
 function makeEmailResponse(overrides = {}) {
   return {
@@ -19,11 +19,17 @@ function makeEmailResponse(overrides = {}) {
       { uid: 100, subject: 'Hello', from: 'alice@test.com', date: new Date().toISOString() },
       { uid: 99, subject: 'Older', from: 'bob@test.com', date: new Date().toISOString() },
     ],
-    since_timestamp: 1700000000000,
+    since_timestamp: Date.now() - 60_000,
     last_open: null,
     watermark_uid: null,
     ...overrides,
   };
+}
+
+async function fetchForAccount(result, since) {
+  await act(async () => {
+    await result.current.fetchEmails(since, ACCOUNT);
+  });
 }
 
 describe('useEmails', () => {
@@ -32,118 +38,105 @@ describe('useEmails', () => {
     sessionStorage.clear();
   });
 
-  afterEach(() => {
-    sessionStorage.clear();
+  afterEach(() => sessionStorage.clear());
+
+  it('stores a cursor under an account-scoped key', async () => {
+    const since = Date.now() - 60_000;
+    api.getEmails.mockResolvedValue(makeEmailResponse({ since_timestamp: since }));
+    const { result } = renderHook(() => useEmails(ACCOUNT));
+
+    await fetchForAccount(result);
+
+    expect(sessionStorage.getItem(SINCE_KEY)).toBe(String(since));
+    expect(sessionStorage.getItem('inboxmax_since')).toBeNull();
   });
 
-  it('stores since_timestamp in sessionStorage after fetch', async () => {
-    api.getEmails.mockResolvedValue(makeEmailResponse({ since_timestamp: 1700000000000 }));
-
-    const { result } = renderHook(() => useEmails());
-
-    await act(async () => {
-      await result.current.fetchEmails();
-    });
-
-    expect(sessionStorage.getItem(SINCE_KEY)).toBe('1700000000000');
-  });
-
-  it('uses sessionStorage since on subsequent fetches', async () => {
-    // Simulate a previous session having stored a since value
-    sessionStorage.setItem(SINCE_KEY, '1699000000000');
-
+  it('uses a recent stored cursor for the same account', async () => {
+    const storedSince = Date.now() - 120_000;
+    sessionStorage.setItem(SINCE_KEY, String(storedSince));
     api.getEmails.mockResolvedValue(makeEmailResponse());
+    const { result } = renderHook(() => useEmails(ACCOUNT));
 
-    const { result } = renderHook(() => useEmails());
+    await fetchForAccount(result);
 
-    await act(async () => {
-      await result.current.fetchEmails();
-    });
-
-    // Should have passed the sessionStorage value as the since param
-    expect(api.getEmails).toHaveBeenCalledWith(1699000000000);
+    expect(api.getEmails).toHaveBeenCalledWith(storedSince);
   });
 
-  it('uses in-memory ref over sessionStorage after first fetch', async () => {
-    api.getEmails.mockResolvedValue(makeEmailResponse({ since_timestamp: 1700000000000 }));
+  it('rejects stale and future stored cursors', async () => {
+    for (const invalid of [Date.now() - 8 * 24 * 60 * 60 * 1000, Date.now() + 60_000]) {
+      sessionStorage.setItem(SINCE_KEY, String(invalid));
+      api.getEmails.mockResolvedValueOnce(makeEmailResponse());
+      const { result, unmount } = renderHook(() => useEmails(ACCOUNT));
+      await fetchForAccount(result);
+      expect(api.getEmails).toHaveBeenLastCalledWith(undefined);
+      unmount();
+    }
+  });
 
-    const { result } = renderHook(() => useEmails());
+  it('uses its in-memory cursor after the first fetch', async () => {
+    const since = Date.now() - 60_000;
+    api.getEmails.mockResolvedValue(makeEmailResponse({ since_timestamp: since }));
+    const { result } = renderHook(() => useEmails(ACCOUNT));
 
-    // First fetch - no since stored anywhere
-    await act(async () => {
-      await result.current.fetchEmails();
-    });
-
-    expect(api.getEmails).toHaveBeenCalledWith(undefined);
-
-    // Second fetch - should use the ref (1700000000000)
+    await fetchForAccount(result);
     api.getEmails.mockClear();
-    api.getEmails.mockResolvedValue(makeEmailResponse({ since_timestamp: 1700000000000 }));
+    await fetchForAccount(result);
 
-    await act(async () => {
-      await result.current.fetchEmails();
-    });
-
-    expect(api.getEmails).toHaveBeenCalledWith(1700000000000);
+    expect(api.getEmails).toHaveBeenCalledWith(since);
   });
 
-  it('explicit since param overrides stored value', async () => {
-    sessionStorage.setItem(SINCE_KEY, '1699000000000');
+  it('lets an explicit cursor override stored state', async () => {
+    sessionStorage.setItem(SINCE_KEY, String(Date.now() - 120_000));
     api.getEmails.mockResolvedValue(makeEmailResponse());
+    const { result } = renderHook(() => useEmails(ACCOUNT));
 
-    const { result } = renderHook(() => useEmails());
+    await fetchForAccount(result, 1_650_000_000_000);
 
-    await act(async () => {
-      await result.current.fetchEmails(1650000000000);
-    });
-
-    expect(api.getEmails).toHaveBeenCalledWith(1650000000000);
+    expect(api.getEmails).toHaveBeenCalledWith(1_650_000_000_000);
   });
 
-  it('updates emails state from API response', async () => {
+  it('updates inbox and watermark state from the API', async () => {
     const emails = [{ uid: 50, subject: 'Test', from: 'x@y.com', date: null }];
-    api.getEmails.mockResolvedValue(makeEmailResponse({ emails }));
+    api.getEmails.mockResolvedValue(makeEmailResponse({ emails, watermark_uid: 49 }));
+    const { result } = renderHook(() => useEmails(ACCOUNT));
 
-    const { result } = renderHook(() => useEmails());
-
-    await act(async () => {
-      await result.current.fetchEmails();
-    });
+    await fetchForAccount(result);
 
     expect(result.current.emails).toEqual(emails);
-    expect(result.current.sinceTimestamp).toBe(1700000000000);
+    expect(result.current.watermarkUid).toBe(49);
   });
 
-  it('sets watermark_uid from response', async () => {
-    api.getEmails.mockResolvedValue(makeEmailResponse({ watermark_uid: 95 }));
-
-    const { result } = renderHook(() => useEmails());
-
-    await act(async () => {
-      await result.current.fetchEmails();
-    });
-
-    expect(result.current.watermarkUid).toBe(95);
-  });
-
-  it('search clears sinceTimestamp and lastOpen', async () => {
+  it('keeps search results separate from the inbox window', async () => {
     api.getEmails.mockResolvedValue(makeEmailResponse({ since_timestamp: 123, last_open: 456 }));
     api.searchEmails.mockResolvedValue([{ uid: 1, subject: 'Found' }]);
+    const { result } = renderHook(() => useEmails(ACCOUNT));
+    await fetchForAccount(result);
 
-    const { result } = renderHook(() => useEmails());
+    await act(async () => result.current.search('test'));
 
-    // First fetch
-    await act(async () => {
-      await result.current.fetchEmails();
-    });
     expect(result.current.sinceTimestamp).toBe(123);
+    expect(result.current.lastOpen).toBe(456);
+    expect(result.current.searchResults).toEqual([{ uid: 1, subject: 'Found' }]);
+    expect(result.current.emails).toHaveLength(2);
+  });
 
-    // Search
-    await act(async () => {
-      await result.current.search('test');
+  it('serializes watermark writes in user order', async () => {
+    const resolvers = [];
+    api.setWatermark.mockImplementation(() => new Promise((resolve) => resolvers.push(resolve)));
+    const { result } = renderHook(() => useEmails(ACCOUNT));
+
+    let first;
+    let second;
+    act(() => {
+      first = result.current.saveWatermark(10);
+      second = result.current.saveWatermark(11);
     });
-
-    expect(result.current.sinceTimestamp).toBeNull();
-    expect(result.current.lastOpen).toBeNull();
+    await act(async () => Promise.resolve());
+    expect(api.setWatermark).toHaveBeenCalledTimes(1);
+    resolvers.shift()();
+    await act(async () => first);
+    expect(api.setWatermark).toHaveBeenCalledTimes(2);
+    resolvers.shift()();
+    await act(async () => second);
   });
 });

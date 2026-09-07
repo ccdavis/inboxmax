@@ -3,7 +3,12 @@ use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+
+const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const DEFAULT_MAX_SESSIONS: usize = 10_000;
+const DEVICE_TOKEN_LIFETIME_SECONDS: i64 = 30 * 24 * 60 * 60;
 
 /// App-level user (from registration / device cookie).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,77 +19,145 @@ pub struct UserSession {
 }
 
 /// IMAP account connection (temporary, in-memory).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct SessionAccount {
     pub id: String,
     pub email: String,
     pub password: String,
     pub imap_host: String,
     pub imap_port: u16,
-    pub smtp_host: String,
-    pub smtp_port: u16,
+}
+
+impl SessionAccount {
+    pub fn mail_credentials(&self) -> crate::imap_client::MailCredentials {
+        crate::imap_client::MailCredentials {
+            host: self.imap_host.clone(),
+            port: self.imap_port,
+            email: self.email.clone(),
+            password: self.password.clone(),
+        }
+    }
 }
 
 /// Full session: optional user + optional IMAP connection.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Session {
     pub user: Option<UserSession>,
     pub account: Option<SessionAccount>,
 }
 
 /// Simple in-memory session store keyed by token.
-#[derive(Debug, Clone)]
+struct StoredSession {
+    session: Session,
+    last_used: Instant,
+}
+
+#[derive(Clone)]
 pub struct SessionStore {
-    sessions: Arc<RwLock<HashMap<String, Session>>>,
+    sessions: Arc<RwLock<HashMap<String, StoredSession>>>,
+    ttl: Duration,
+    max_sessions: usize,
 }
 
 impl SessionStore {
     pub fn new() -> Self {
+        Self::with_limits(DEFAULT_SESSION_TTL, DEFAULT_MAX_SESSIONS)
+    }
+
+    pub fn with_limits(ttl: Duration, max_sessions: usize) -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            ttl,
+            max_sessions: max_sessions.max(1),
         }
     }
 
     pub async fn set_user(&self, token: &str, user: UserSession) {
         let mut sessions = self.sessions.write().await;
-        let session = sessions
+        Self::prune(&mut sessions, self.ttl);
+        let stored = sessions
             .entry(token.to_string())
-            .or_insert_with(|| Session {
-                user: None,
-                account: None,
+            .or_insert_with(|| StoredSession {
+                session: Session {
+                    user: None,
+                    account: None,
+                },
+                last_used: Instant::now(),
             });
-        session.user = Some(user);
+        stored.session.user = Some(user);
+        stored.last_used = Instant::now();
+        Self::enforce_capacity(&mut sessions, self.max_sessions);
     }
 
     pub async fn set_account(&self, token: &str, account: SessionAccount) {
         let mut sessions = self.sessions.write().await;
-        let session = sessions
+        Self::prune(&mut sessions, self.ttl);
+        let stored = sessions
             .entry(token.to_string())
-            .or_insert_with(|| Session {
-                user: None,
-                account: None,
+            .or_insert_with(|| StoredSession {
+                session: Session {
+                    user: None,
+                    account: None,
+                },
+                last_used: Instant::now(),
             });
-        session.account = Some(account);
+        stored.session.account = Some(account);
+        stored.last_used = Instant::now();
+        Self::enforce_capacity(&mut sessions, self.max_sessions);
     }
 
     pub async fn get_user(&self, token: &str) -> Option<UserSession> {
-        self.sessions
-            .read()
-            .await
-            .get(token)
-            .and_then(|s| s.user.clone())
+        let mut sessions = self.sessions.write().await;
+        Self::get_valid(&mut sessions, token, self.ttl).and_then(|s| s.user.clone())
     }
 
     pub async fn get_account(&self, token: &str) -> Option<SessionAccount> {
-        self.sessions
-            .read()
-            .await
-            .get(token)
-            .and_then(|s| s.account.clone())
+        let mut sessions = self.sessions.write().await;
+        Self::get_valid(&mut sessions, token, self.ttl).and_then(|s| s.account.clone())
     }
 
     pub async fn remove(&self, token: &str) {
         self.sessions.write().await.remove(token);
+    }
+
+    fn get_valid<'a>(
+        sessions: &'a mut HashMap<String, StoredSession>,
+        token: &str,
+        ttl: Duration,
+    ) -> Option<&'a Session> {
+        let expired = sessions
+            .get(token)
+            .is_some_and(|stored| stored.last_used.elapsed() >= ttl);
+        if expired {
+            sessions.remove(token);
+            return None;
+        }
+        let stored = sessions.get_mut(token)?;
+        stored.last_used = Instant::now();
+        Some(&stored.session)
+    }
+
+    fn prune(sessions: &mut HashMap<String, StoredSession>, ttl: Duration) {
+        sessions.retain(|_, stored| stored.last_used.elapsed() < ttl);
+    }
+
+    fn enforce_capacity(sessions: &mut HashMap<String, StoredSession>, max_sessions: usize) {
+        while sessions.len() > max_sessions {
+            let Some(oldest) = sessions
+                .iter()
+                .min_by_key(|(_, stored)| stored.last_used)
+                .map(|(token, _)| token.clone())
+            else {
+                break;
+            };
+            sessions.remove(&oldest);
+        }
+    }
+}
+
+impl Default for SessionStore {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -122,9 +195,11 @@ pub async fn validate_device_token(
         "SELECT u.id, u.email, u.display_name
          FROM device_tokens dt
          JOIN users u ON u.id = dt.user_id
-         WHERE dt.token_hash = ?",
+         WHERE dt.token_hash = ?
+           AND dt.created_at >= unixepoch() - ?",
     )
     .bind(&hashed)
+    .bind(DEVICE_TOKEN_LIFETIME_SECONDS)
     .fetch_optional(db)
     .await?;
 
@@ -161,9 +236,15 @@ pub async fn cleanup_device_tokens(
     user_id: &str,
     keep: i64,
 ) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM device_tokens WHERE created_at < unixepoch() - ?")
+        .bind(DEVICE_TOKEN_LIFETIME_SECONDS)
+        .execute(db)
+        .await?;
+
     sqlx::query(
         "DELETE FROM device_tokens WHERE user_id = ? AND id NOT IN (
-            SELECT id FROM device_tokens WHERE user_id = ? ORDER BY last_used DESC LIMIT ?
+            SELECT id FROM device_tokens WHERE user_id = ?
+            ORDER BY last_used DESC, created_at DESC LIMIT ?
         )",
     )
     .bind(user_id)
@@ -172,4 +253,84 @@ pub async fn cleanup_device_tokens(
     .execute(db)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        SessionStore, UserSession, cleanup_device_tokens, create_device_token, hash_token,
+        validate_device_token,
+    };
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::time::Duration;
+
+    fn user(id: &str) -> UserSession {
+        UserSession {
+            user_id: id.into(),
+            email: format!("{id}@example.com"),
+            display_name: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_sessions_are_removed() {
+        let store = SessionStore::with_limits(Duration::ZERO, 10);
+        store.set_user("token", user("one")).await;
+        assert!(store.get_user("token").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn capacity_evicts_an_old_session() {
+        let store = SessionStore::with_limits(Duration::from_secs(60), 1);
+        store.set_user("old", user("one")).await;
+        tokio::task::yield_now().await;
+        store.set_user("new", user("two")).await;
+        assert!(store.get_user("old").await.is_none());
+        assert_eq!(store.get_user("new").await.unwrap().user_id, "two");
+    }
+
+    async fn token_db() -> sqlx::SqlitePool {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, email, password_hash) VALUES ('user', 'u@example.com', 'x')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        db
+    }
+
+    #[tokio::test]
+    async fn expired_device_tokens_are_rejected() {
+        let db = token_db().await;
+        let token = create_device_token(&db, "user").await.unwrap();
+        sqlx::query("UPDATE device_tokens SET created_at = 0 WHERE token_hash = ?")
+            .bind(hash_token(&token))
+            .execute(&db)
+            .await
+            .unwrap();
+
+        assert!(validate_device_token(&db, &token).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn device_token_cleanup_honors_the_requested_limit() {
+        let db = token_db().await;
+        for _ in 0..12 {
+            create_device_token(&db, "user").await.unwrap();
+        }
+        cleanup_device_tokens(&db, "user", 10).await.unwrap();
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM device_tokens WHERE user_id = 'user'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(count, 10);
+    }
 }

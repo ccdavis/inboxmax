@@ -1,14 +1,14 @@
+use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use axum::routing::{get, put};
-use axum::Router;
 use chrono::{NaiveDate, Utc};
 use http_body_util::BodyExt;
 use inboxmax_server::error::AppResult;
-use inboxmax_server::handlers::emails;
-use inboxmax_server::imap_client::{EmailEnvelope, FullEmail, MailFetcher};
+use inboxmax_server::imap_client::{
+    EmailEnvelope, FullEmail, MailCredentials, MailFetcher, MailboxSnapshot,
+};
 use inboxmax_server::session::{SessionAccount, SessionStore};
-use inboxmax_server::AppState;
+use inboxmax_server::{AppState, api_router};
 use serde_json::Value;
 use sqlx::SqlitePool;
 use std::sync::Arc;
@@ -32,23 +32,16 @@ impl MockMailFetcher {
 impl MailFetcher for MockMailFetcher {
     async fn fetch_envelopes(
         &self,
-        _host: &str,
-        _port: u16,
-        _email: &str,
-        _password: &str,
+        _credentials: &MailCredentials,
         _since: NaiveDate,
-    ) -> AppResult<Vec<EmailEnvelope>> {
-        Ok(self.envelopes.clone())
+    ) -> AppResult<MailboxSnapshot> {
+        Ok(MailboxSnapshot {
+            envelopes: self.envelopes.clone(),
+            uid_validity: Some(1),
+        })
     }
 
-    async fn fetch_email(
-        &self,
-        _host: &str,
-        _port: u16,
-        _email: &str,
-        _password: &str,
-        uid: u32,
-    ) -> AppResult<FullEmail> {
+    async fn fetch_email(&self, _credentials: &MailCredentials, uid: u32) -> AppResult<FullEmail> {
         Ok(FullEmail {
             uid,
             subject: "Test".into(),
@@ -63,22 +56,13 @@ impl MailFetcher for MockMailFetcher {
 
     async fn search(
         &self,
-        _host: &str,
-        _port: u16,
-        _email: &str,
-        _password: &str,
+        _credentials: &MailCredentials,
         _query: &str,
     ) -> AppResult<Vec<EmailEnvelope>> {
         Ok(self.envelopes.clone())
     }
 
-    async fn verify_credentials(
-        &self,
-        _host: &str,
-        _port: u16,
-        _email: &str,
-        _password: &str,
-    ) -> AppResult<()> {
+    async fn verify_credentials(&self, _credentials: &MailCredentials) -> AppResult<()> {
         Ok(())
     }
 }
@@ -94,14 +78,12 @@ fn sample_envelopes() -> Vec<EmailEnvelope> {
             subject: "Hello".into(),
             from: "alice@example.com".into(),
             date: Some(Utc::now()),
-            has_attachment: false,
         },
         EmailEnvelope {
             uid: 99,
             subject: "Older".into(),
             from: "bob@example.com".into(),
             date: Some(Utc::now() - chrono::Duration::hours(2)),
-            has_attachment: false,
         },
     ]
 }
@@ -127,10 +109,7 @@ async fn seed_account(pool: &SqlitePool) {
 }
 
 fn build_app(state: AppState) -> Router {
-    Router::new()
-        .route("/api/emails", get(emails::list_emails))
-        .route("/api/watermark", put(emails::set_watermark))
-        .with_state(state)
+    api_router(state)
 }
 
 async fn build_state(envelopes: Vec<EmailEnvelope>) -> AppState {
@@ -146,8 +125,6 @@ async fn build_state(envelopes: Vec<EmailEnvelope>) -> AppState {
                 password: "pass".into(),
                 imap_host: "imap.test.com".into(),
                 imap_port: 993,
-                smtp_host: "smtp.test.com".into(),
-                smtp_port: 587,
             },
         )
         .await;
@@ -182,23 +159,29 @@ async fn parse_response(resp: axum::response::Response) -> Value {
 }
 
 async fn get_last_open(pool: &SqlitePool) -> Option<i64> {
-    let row: (Option<i64>,) =
-        sqlx::query_as("SELECT last_open FROM accounts WHERE id = ?")
-            .bind(ACCOUNT_ID)
-            .fetch_one(pool)
-            .await
-            .unwrap();
+    let row: (Option<i64>,) = sqlx::query_as("SELECT last_open FROM accounts WHERE id = ?")
+        .bind(ACCOUNT_ID)
+        .fetch_one(pool)
+        .await
+        .unwrap();
     row.0
 }
 
 async fn get_watermark_uid(pool: &SqlitePool) -> Option<i64> {
-    let row: (Option<i64>,) =
-        sqlx::query_as("SELECT watermark_uid FROM accounts WHERE id = ?")
-            .bind(ACCOUNT_ID)
-            .fetch_one(pool)
-            .await
-            .unwrap();
+    let row: (Option<i64>,) = sqlx::query_as("SELECT watermark_uid FROM accounts WHERE id = ?")
+        .bind(ACCOUNT_ID)
+        .fetch_one(pool)
+        .await
+        .unwrap();
     row.0
+}
+
+async fn get_uid_validity(pool: &SqlitePool) -> Option<i64> {
+    sqlx::query_scalar("SELECT uid_validity FROM accounts WHERE id = ?")
+        .bind(ACCOUNT_ID)
+        .fetch_one(pool)
+        .await
+        .unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -216,7 +199,10 @@ mod calculate_since_ms_tests {
     #[test]
     fn explicit_since_wins() {
         let since = 1_699_000_000_000;
-        assert_eq!(calculate_since_ms(Some(since), Some(NOW - 1000), NOW), since);
+        assert_eq!(
+            calculate_since_ms(Some(since), Some(NOW - 1000), NOW),
+            since
+        );
     }
 
     #[test]
@@ -264,7 +250,10 @@ async fn list_emails_sets_last_open_on_first_visit() {
 
     // After first fetch, last_open should be set
     let last_open = get_last_open(&state.db).await;
-    assert!(last_open.is_some(), "last_open should be set after first fetch");
+    assert!(
+        last_open.is_some(),
+        "last_open should be set after first fetch"
+    );
 }
 
 #[tokio::test]
@@ -296,17 +285,24 @@ async fn list_emails_does_not_update_last_open_on_subsequent_calls() {
 #[tokio::test]
 async fn list_emails_returns_emails_on_repeated_calls() {
     let state = build_state(sample_envelopes()).await;
+    let since = Utc::now().timestamp_millis() - 24 * 60 * 60 * 1000;
 
     // First call
     let app = build_app(state.clone());
-    let resp = app.oneshot(emails_request("/api/emails")).await.unwrap();
+    let resp = app
+        .oneshot(emails_request(&format!("/api/emails?since={since}")))
+        .await
+        .unwrap();
     let json = parse_response(resp).await;
     let first_count = json["emails"].as_array().unwrap().len();
     assert_eq!(first_count, 2);
 
     // Second call — should still return emails (the bug was returning 0)
     let app = build_app(state.clone());
-    let resp = app.oneshot(emails_request("/api/emails")).await.unwrap();
+    let resp = app
+        .oneshot(emails_request(&format!("/api/emails?since={since}")))
+        .await
+        .unwrap();
     let json = parse_response(resp).await;
     let second_count = json["emails"].as_array().unwrap().len();
     assert_eq!(
@@ -327,6 +323,55 @@ async fn list_emails_respects_explicit_since_param() {
         .unwrap();
     let json = parse_response(resp).await;
     assert_eq!(json["since_timestamp"].as_i64().unwrap(), since);
+}
+
+#[tokio::test]
+async fn list_emails_filters_imap_day_results_to_the_exact_timestamp() {
+    let now = Utc::now();
+    let state = build_state(vec![
+        EmailEnvelope {
+            uid: 2,
+            subject: "New".into(),
+            from: "new@example.com".into(),
+            date: Some(now),
+        },
+        EmailEnvelope {
+            uid: 1,
+            subject: "Before cursor".into(),
+            from: "old@example.com".into(),
+            date: Some(now - chrono::Duration::hours(2)),
+        },
+    ])
+    .await;
+    let since = (now - chrono::Duration::hours(1)).timestamp_millis();
+    let response = build_app(state)
+        .oneshot(emails_request(&format!("/api/emails?since={since}")))
+        .await
+        .unwrap();
+    let json = parse_response(response).await;
+
+    assert_eq!(json["emails"].as_array().unwrap().len(), 1);
+    assert_eq!(json["emails"][0]["uid"], 2);
+}
+
+#[tokio::test]
+async fn uid_validity_change_clears_a_stale_watermark() {
+    let state = build_state(sample_envelopes()).await;
+    sqlx::query("UPDATE accounts SET uid_validity = 999, watermark_uid = 100 WHERE id = ?")
+        .bind(ACCOUNT_ID)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let response = build_app(state.clone())
+        .oneshot(emails_request("/api/emails"))
+        .await
+        .unwrap();
+    let json = parse_response(response).await;
+
+    assert!(json["watermark_uid"].is_null());
+    assert_eq!(get_watermark_uid(&state.db).await, None);
+    assert_eq!(get_uid_validity(&state.db).await, Some(1));
 }
 
 #[tokio::test]
@@ -376,10 +421,13 @@ async fn set_watermark_updates_watermark_uid_and_last_open() {
 #[tokio::test]
 async fn after_watermark_save_list_emails_still_returns_data() {
     let state = build_state(sample_envelopes()).await;
+    let since = Utc::now().timestamp_millis() - 24 * 60 * 60 * 1000;
 
     // First fetch
     let app = build_app(state.clone());
-    app.oneshot(emails_request("/api/emails")).await.unwrap();
+    app.oneshot(emails_request(&format!("/api/emails?since={since}")))
+        .await
+        .unwrap();
 
     // Save watermark (simulates tabbing away)
     let app = build_app(state.clone());
@@ -389,7 +437,10 @@ async fn after_watermark_save_list_emails_still_returns_data() {
     // the same envelopes, but the important thing is last_open is set
     // and it doesn't cause an error
     let app = build_app(state.clone());
-    let resp = app.oneshot(emails_request("/api/emails")).await.unwrap();
+    let resp = app
+        .oneshot(emails_request(&format!("/api/emails?since={since}")))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = parse_response(resp).await;
     assert_eq!(json["emails"].as_array().unwrap().len(), 2);

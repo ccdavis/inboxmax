@@ -1,14 +1,17 @@
+import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import * as api from '../api';
 
 export default function LandingPage({ user, onSignOut }) {
   const navigate = useNavigate();
+  const [signOutError, setSignOutError] = useState(null);
 
   const handleSignOut = async () => {
     try {
       await api.signout();
-    } catch {
-      // Still clear local state even if API fails
+    } catch (caught) {
+      setSignOutError(`Could not sign out: ${caught.message}`);
+      return;
     }
     onSignOut();
   };
@@ -38,6 +41,12 @@ export default function LandingPage({ user, onSignOut }) {
             </button>
           </nav>
         </header>
+
+        {signOutError && (
+          <div role="alert" className="bg-red-50 text-red-700 text-sm px-6 py-2 border-y border-red-100">
+            {signOutError}
+          </div>
+        )}
 
         <main className="flex-1 flex flex-col items-center justify-center px-4">
           <h1 className="text-3xl font-light text-slate-800 mb-8">

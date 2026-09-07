@@ -3,33 +3,43 @@ import DOMPurify from 'dompurify';
 import * as api from '../api';
 import { formatFullDate } from '../utils/dates';
 
+function sanitizeEmailHtml(html) {
+  const clean = DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: [
+      'p', 'br', 'b', 'i', 'u', 'strong', 'em', 'a', 'div', 'span',
+      'table', 'tr', 'td', 'th', 'thead', 'tbody', 'h1', 'h2', 'h3', 'h4',
+      'ul', 'ol', 'li', 'blockquote', 'pre', 'code', 'hr',
+    ],
+    ALLOWED_ATTR: ['href', 'target', 'rel', 'width', 'height', 'colspan', 'rowspan'],
+  });
+  const template = document.createElement('template');
+  template.innerHTML = clean;
+  for (const link of template.content.querySelectorAll('a[href]')) {
+    link.setAttribute('target', '_blank');
+    link.setAttribute('rel', 'noopener noreferrer');
+  }
+  return template.innerHTML;
+}
+
 export default function EmailReader({ emailUid, onBack }) {
-  const [email, setEmail] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [request, setRequest] = useState({ uid: null, email: null, error: null });
 
   useEffect(() => {
     let cancelled = false;
-    setEmail(null);
-    setError(null);
-    setLoading(true);
     api
       .getEmail(emailUid)
       .then((data) => {
-        if (!cancelled) setEmail(data);
+        if (!cancelled) setRequest({ uid: emailUid, email: data, error: null });
       })
       .catch((e) => {
-        if (!cancelled) setError(e.message);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) setRequest({ uid: emailUid, email: null, error: e.message });
       });
     return () => {
       cancelled = true;
     };
   }, [emailUid]);
 
-  if (loading) {
+  if (request.uid !== emailUid) {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="w-6 h-6 border-2 border-slate-300 border-t-slate-600 rounded-full animate-spin" />
@@ -37,42 +47,24 @@ export default function EmailReader({ emailUid, onBack }) {
     );
   }
 
-  if (error) {
+  if (request.error) {
     return (
       <div className="p-4">
         <button onClick={onBack} className="text-sm text-blue-600 hover:text-blue-700 mb-4 py-1 flex items-center gap-1">
           <span>&larr;</span> Back
         </button>
         <div className="bg-red-50 text-red-700 text-sm px-4 py-3 rounded-lg border border-red-100">
-          {error}
+          {request.error}
         </div>
       </div>
     );
   }
 
-  if (!email) return null;
+  if (!request.email) return null;
 
-  const bodyHtml = email.body_html
-    ? (() => {
-        // Force all links to open in a new tab
-        DOMPurify.addHook('afterSanitizeAttributes', (node) => {
-          if (node.tagName === 'A' && node.hasAttribute('href')) {
-            node.setAttribute('target', '_blank');
-            node.setAttribute('rel', 'noopener noreferrer');
-          }
-        });
-        const clean = DOMPurify.sanitize(email.body_html, {
-          ALLOW_TAGS: [
-            'p', 'br', 'b', 'i', 'u', 'strong', 'em', 'a', 'img', 'div', 'span',
-            'table', 'tr', 'td', 'th', 'thead', 'tbody', 'h1', 'h2', 'h3', 'h4',
-            'ul', 'ol', 'li', 'blockquote', 'pre', 'code', 'hr',
-          ],
-          ALLOW_ATTR: ['href', 'src', 'alt', 'style', 'class', 'target', 'rel', 'width', 'height'],
-        });
-        DOMPurify.removeHook('afterSanitizeAttributes');
-        return clean;
-      })()
-    : null;
+  const email = request.email;
+
+  const bodyHtml = email.body_html ? sanitizeEmailHtml(email.body_html) : null;
 
   return (
     <div className="flex flex-col h-full">

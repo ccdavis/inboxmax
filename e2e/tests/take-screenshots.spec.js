@@ -20,14 +20,14 @@ function hoursAgo(h) {
 const WATERMARK_UID = 204;
 
 const MOCK_EMAILS = [
-  { uid: 208, subject: 'PR #47 merged: fix dashboard layout', from: 'GitHub', date: hoursAgo(0.1), has_attachment: false },
-  { uid: 207, subject: 'Your AWS billing summary for March', from: 'Amazon Web Services', date: hoursAgo(0.5), has_attachment: true },
-  { uid: 206, subject: 'Quick question about the API spec', from: 'Sarah Chen', date: hoursAgo(1.2), has_attachment: false },
-  { uid: 205, subject: 'Team standup notes - March 4', from: 'Notion', date: hoursAgo(2), has_attachment: false },
-  { uid: 204, subject: 'Invitation: Design review @ Wed 2pm', from: 'Google Calendar', date: hoursAgo(3.5), has_attachment: false },
-  { uid: 203, subject: 'Your order has shipped!', from: 'Amazon', date: hoursAgo(5), has_attachment: false },
-  { uid: 202, subject: 'New sign-in from Chrome on Linux', from: 'Google', date: hoursAgo(7), has_attachment: false },
-  { uid: 201, subject: 'Invoice #1042 from Acme Corp', from: 'Stripe', date: hoursAgo(9), has_attachment: true },
+  { uid: 208, subject: 'PR #47 merged: fix dashboard layout', from: 'GitHub', date: hoursAgo(0.1) },
+  { uid: 207, subject: 'Your AWS billing summary for March', from: 'Amazon Web Services', date: hoursAgo(0.5) },
+  { uid: 206, subject: 'Quick question about the API spec', from: 'Sarah Chen', date: hoursAgo(1.2) },
+  { uid: 205, subject: 'Team standup notes - March 4', from: 'Notion', date: hoursAgo(2) },
+  { uid: 204, subject: 'Invitation: Design review @ Wed 2pm', from: 'Google Calendar', date: hoursAgo(3.5) },
+  { uid: 203, subject: 'Your order has shipped!', from: 'Amazon', date: hoursAgo(5) },
+  { uid: 202, subject: 'New sign-in from Chrome on Linux', from: 'Google', date: hoursAgo(7) },
+  { uid: 201, subject: 'Invoice #1042 from Acme Corp', from: 'Stripe', date: hoursAgo(9) },
 ];
 
 const MOCK_REMEMBERED = [

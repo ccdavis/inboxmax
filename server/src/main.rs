@@ -1,8 +1,6 @@
-use axum::routing::{delete, get, post, put};
-use axum::Router;
 use inboxmax_server::imap_client::RealMailFetcher;
 use inboxmax_server::session::SessionStore;
-use inboxmax_server::{db, handlers, AppState};
+use inboxmax_server::{AppState, api_router, db};
 use std::sync::Arc;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -21,10 +19,12 @@ async fn main() -> anyhow::Result<()> {
     let database_url =
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:data/inboxmax.db".into());
 
-    if let Some(path) = database_url.strip_prefix("sqlite:") {
-        if let Some(parent) = std::path::Path::new(path).parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(path) = database_url.strip_prefix("sqlite:")
+        && path != ":memory:"
+        && let Some(parent) = std::path::Path::new(path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
     }
 
     let pool = db::init_pool(&database_url).await?;
@@ -35,36 +35,7 @@ async fn main() -> anyhow::Result<()> {
         mail: Arc::new(RealMailFetcher),
     };
 
-    // API routes
-    let api = Router::new()
-        // App auth
-        .route("/api/register", post(handlers::auth::register))
-        .route("/api/signin", post(handlers::auth::signin))
-        .route("/api/signout", post(handlers::auth::signout))
-        .route("/api/me", get(handlers::auth::me))
-        // IMAP connect
-        .route("/api/connect", post(handlers::auth::connect))
-        // Auth status
-        .route("/api/auth/status", get(handlers::auth::status))
-        // Emails
-        .route("/api/emails", get(handlers::emails::list_emails))
-        .route("/api/emails/{uid}", get(handlers::emails::get_email))
-        .route("/api/search", get(handlers::emails::search_emails))
-        .route("/api/watermark", put(handlers::emails::set_watermark))
-        // Remembered
-        .route(
-            "/api/remembered",
-            get(handlers::remembered::list_remembered),
-        )
-        .route(
-            "/api/remembered/{uid}",
-            post(handlers::remembered::remember_email),
-        )
-        .route(
-            "/api/remembered/{uid}",
-            delete(handlers::remembered::forget_email),
-        )
-        .with_state(state);
+    let api = api_router(state);
 
     // Serve the built React frontend for all non-API routes.
     // `npm run build` in client/ outputs to client/dist/.
@@ -72,9 +43,7 @@ async fn main() -> anyhow::Result<()> {
     let index_file = format!("{static_dir}/index.html");
 
     let app = api
-        .fallback_service(
-            ServeDir::new(&static_dir).fallback(ServeFile::new(&index_file)),
-        )
+        .fallback_service(ServeDir::new(&static_dir).fallback(ServeFile::new(&index_file)))
         .layer(TraceLayer::new_for_http());
 
     let port: u16 = std::env::var("PORT")

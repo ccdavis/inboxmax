@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import EmailReader from './EmailReader';
 
 // Mock the api module
@@ -11,6 +11,7 @@ import * as api from '../api';
 
 describe('EmailReader', () => {
   beforeEach(() => {
+    cleanup();
     vi.clearAllMocks();
   });
 
@@ -40,7 +41,7 @@ describe('EmailReader', () => {
     }
   });
 
-  it('does not add target to non-link elements', async () => {
+  it('does not invent links for non-link content', async () => {
     api.getEmail.mockResolvedValue({
       uid: 2,
       subject: 'Plain Email',
@@ -57,11 +58,26 @@ describe('EmailReader', () => {
       expect(screen.getByText('No links here')).toBeInTheDocument();
     });
 
-    const links = document.querySelectorAll('a[target="_blank"]');
-    // Only the "Back to inbox" button link should exist, not email body links
-    for (const link of links) {
-      expect(link.textContent).not.toBe('No links here');
-    }
+    expect(document.querySelectorAll('a[target="_blank"]')).toHaveLength(0);
+  });
+
+  it('blocks scripts, inline styles, and remote images', async () => {
+    api.getEmail.mockResolvedValue({
+      uid: 4,
+      subject: 'Tracked Email',
+      from: 'sender@example.com',
+      to: 'me@example.com',
+      date: new Date().toISOString(),
+      body_html: '<script>alert(1)</script><p style="background:url(https://tracker.test/pixel)">Safe</p><img src="https://tracker.test/pixel">',
+      body_text: null,
+    });
+
+    render(<EmailReader emailUid={4} onBack={() => {}} />);
+    await waitFor(() => expect(screen.getByText('Safe')).toBeInTheDocument());
+
+    expect(document.querySelector('script')).toBeNull();
+    expect(document.querySelector('img')).toBeNull();
+    expect(screen.getByText('Safe')).not.toHaveAttribute('style');
   });
 
   it('renders plain text body when no HTML', async () => {

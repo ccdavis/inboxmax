@@ -1,13 +1,14 @@
-use crate::config::detect_provider;
-use crate::error::{AppError, AppResult};
-use crate::session::{self, SessionAccount, UserSession};
 use crate::AppState;
+use crate::config::{detect_provider, guess_provider};
+use crate::error::{AppError, AppResult};
+use crate::imap_client::MailCredentials;
+use crate::session::{self, SessionAccount, UserSession};
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
-use rand_core::OsRng;
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use axum_extra::extract::cookie::{Cookie, CookieJar};
+use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 
 const SESSION_COOKIE: &str = "inboxmax_session";
@@ -24,7 +25,7 @@ pub struct RegisterRequest {
 }
 
 #[derive(Serialize)]
-pub struct RegisterResponse {
+pub struct UserResponse {
     pub user_id: String,
     pub email: String,
     pub display_name: Option<String>,
@@ -36,28 +37,12 @@ pub struct SignInRequest {
     pub password: String,
 }
 
-#[derive(Serialize)]
-pub struct SignInResponse {
-    pub user_id: String,
-    pub email: String,
-    pub display_name: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct MeResponse {
-    pub user_id: String,
-    pub email: String,
-    pub display_name: Option<String>,
-}
-
 #[derive(Deserialize)]
 pub struct ConnectRequest {
     pub email: String,
     pub password: String,
     pub imap_host: Option<String>,
     pub imap_port: Option<u16>,
-    pub smtp_host: Option<String>,
-    pub smtp_port: Option<u16>,
 }
 
 #[derive(Serialize)]
@@ -70,7 +55,7 @@ pub struct ConnectResponse {
 pub struct StatusResponse {
     pub logged_in: bool,
     pub email: Option<String>,
-    pub user: Option<MeResponse>,
+    pub user: Option<UserResponse>,
     pub imap_connected: bool,
     pub imap_email: Option<String>,
 }
@@ -82,9 +67,9 @@ pub async fn register(
     State(state): State<AppState>,
     jar: CookieJar,
     Json(req): Json<RegisterRequest>,
-) -> AppResult<(CookieJar, Json<RegisterResponse>)> {
-    let email = req.email.trim().to_lowercase();
-    if email.is_empty() || req.password.is_empty() {
+) -> AppResult<(CookieJar, Json<UserResponse>)> {
+    let email = normalize_email(&req.email)?;
+    if req.password.is_empty() {
         return Err(AppError::BadRequest(
             "Email and password are required".into(),
         ));
@@ -95,9 +80,9 @@ pub async fn register(
         ));
     }
     if req.password.len() > MAX_PASSWORD_LEN {
-        return Err(AppError::BadRequest(
-            format!("Password must be at most {MAX_PASSWORD_LEN} characters"),
-        ));
+        return Err(AppError::BadRequest(format!(
+            "Password must be at most {MAX_PASSWORD_LEN} characters"
+        )));
     }
 
     // Hash password
@@ -133,35 +118,16 @@ pub async fn register(
         ));
     }
 
-    // Create device token (and clean up old ones — N/A for new user)
-    let device_token = session::create_device_token(&state.db, &user_id).await?;
-    let device_cookie = Cookie::build((DEVICE_COOKIE, device_token))
-        .path("/")
-        .http_only(true)
-        .max_age(max_age_30_days())
-        .same_site(axum_extra::extract::cookie::SameSite::Lax);
-
-    // Also set up an in-memory session
-    let session_token = uuid::Uuid::new_v4().to_string();
-    state
-        .sessions
-        .set_user(
-            &session_token,
-            UserSession {
-                user_id: user_id.clone(),
-                email: email.clone(),
-                display_name: display_name.clone(),
-            },
-        )
-        .await;
-    let session_cookie = Cookie::build((SESSION_COOKIE, session_token))
-        .path("/")
-        .http_only(true)
-        .same_site(axum_extra::extract::cookie::SameSite::Lax);
+    let user = UserSession {
+        user_id: user_id.clone(),
+        email: email.clone(),
+        display_name: display_name.clone(),
+    };
+    let jar = issue_session(&state, jar, user).await?;
 
     Ok((
-        jar.add(device_cookie).add(session_cookie),
-        Json(RegisterResponse {
+        jar,
+        Json(UserResponse {
             user_id,
             email,
             display_name,
@@ -174,8 +140,8 @@ pub async fn signin(
     State(state): State<AppState>,
     jar: CookieJar,
     Json(req): Json<SignInRequest>,
-) -> AppResult<(CookieJar, Json<SignInResponse>)> {
-    let email = req.email.trim().to_lowercase();
+) -> AppResult<(CookieJar, Json<UserResponse>)> {
+    let email = normalize_email(&req.email).map_err(|_| AppError::Unauthorized)?;
 
     if req.password.len() > MAX_PASSWORD_LEN {
         return Err(AppError::Unauthorized);
@@ -196,38 +162,16 @@ pub async fn signin(
         .verify_password(req.password.as_bytes(), &parsed_hash)
         .map_err(|_| AppError::Unauthorized)?;
 
-    // Clean up old device tokens for this user (keep max 10)
-    session::cleanup_device_tokens(&state.db, &user_id, 10).await?;
-
-    // Create device token
-    let device_token = session::create_device_token(&state.db, &user_id).await?;
-    let device_cookie = Cookie::build((DEVICE_COOKIE, device_token))
-        .path("/")
-        .http_only(true)
-        .max_age(max_age_30_days())
-        .same_site(axum_extra::extract::cookie::SameSite::Lax);
-
-    // Set up in-memory session
-    let session_token = uuid::Uuid::new_v4().to_string();
-    state
-        .sessions
-        .set_user(
-            &session_token,
-            UserSession {
-                user_id: user_id.clone(),
-                email: email.clone(),
-                display_name: display_name.clone(),
-            },
-        )
-        .await;
-    let session_cookie = Cookie::build((SESSION_COOKIE, session_token))
-        .path("/")
-        .http_only(true)
-        .same_site(axum_extra::extract::cookie::SameSite::Lax);
+    let user = UserSession {
+        user_id: user_id.clone(),
+        email: email.clone(),
+        display_name: display_name.clone(),
+    };
+    let jar = issue_session(&state, jar, user).await?;
 
     Ok((
-        jar.add(device_cookie).add(session_cookie),
-        Json(SignInResponse {
+        jar,
+        Json(UserResponse {
             user_id,
             email,
             display_name,
@@ -242,7 +186,7 @@ pub async fn signout(
 ) -> AppResult<(CookieJar, Json<serde_json::Value>)> {
     // Remove device token from DB
     if let Some(cookie) = jar.get(DEVICE_COOKIE) {
-        let _ = session::delete_device_token(&state.db, cookie.value()).await;
+        session::delete_device_token(&state.db, cookie.value()).await?;
     }
     // Remove in-memory session
     if let Some(cookie) = jar.get(SESSION_COOKIE) {
@@ -250,17 +194,17 @@ pub async fn signout(
     }
 
     let jar = jar
-        .remove(Cookie::from(DEVICE_COOKIE))
-        .remove(Cookie::from(SESSION_COOKIE));
+        .remove(removal_cookie(DEVICE_COOKIE))
+        .remove(removal_cookie(SESSION_COOKIE));
     Ok((jar, Json(serde_json::json!({ "ok": true }))))
 }
 
 /// GET /api/me — get current user info
-pub async fn me(State(state): State<AppState>, jar: CookieJar) -> AppResult<Json<MeResponse>> {
+pub async fn me(State(state): State<AppState>, jar: CookieJar) -> AppResult<Json<UserResponse>> {
     let user = get_user_from_jar(&state, &jar)
         .await
         .ok_or(AppError::Unauthorized)?;
-    Ok(Json(MeResponse {
+    Ok(Json(UserResponse {
         user_id: user.user_id,
         email: user.email,
         display_name: user.display_name,
@@ -278,72 +222,61 @@ pub async fn connect(
         .await
         .ok_or(AppError::Unauthorized)?;
 
-    let provider = detect_provider(&req.email);
-    let provider_detected = provider.is_some() && req.imap_host.is_none();
-
-    let (imap_host, imap_port, smtp_host, smtp_port) = if let Some(p) = provider {
-        (
-            req.imap_host.unwrap_or(p.imap_host),
-            req.imap_port.unwrap_or(p.imap_port),
-            req.smtp_host.unwrap_or(p.smtp_host),
-            req.smtp_port.unwrap_or(p.smtp_port),
-        )
-    } else {
-        (
-            req.imap_host
-                .ok_or_else(|| AppError::Imap("IMAP host required".into()))?,
-            req.imap_port.unwrap_or(993),
-            req.smtp_host
-                .ok_or_else(|| AppError::Smtp("SMTP host required".into()))?,
-            req.smtp_port.unwrap_or(587),
-        )
+    let email = normalize_email(&req.email)?;
+    let detected_provider = detect_provider(&email);
+    let provider_detected = detected_provider.is_some() && req.imap_host.is_none();
+    let provider = detected_provider
+        .or_else(|| guess_provider(&email))
+        .ok_or_else(|| AppError::BadRequest("Unable to determine IMAP host".into()))?;
+    let imap_host = req
+        .imap_host
+        .filter(|host| !host.trim().is_empty())
+        .map(|host| host.trim().to_lowercase())
+        .unwrap_or(provider.imap_host);
+    let imap_port = req.imap_port.unwrap_or(provider.imap_port);
+    if imap_port == 0 {
+        return Err(AppError::BadRequest("Invalid IMAP port".into()));
+    }
+    let credentials = MailCredentials {
+        host: imap_host.clone(),
+        port: imap_port,
+        email: email.clone(),
+        password: req.password,
     };
 
     // Verify credentials by connecting to IMAP
-    state
-        .mail
-        .verify_credentials(&imap_host, imap_port, &req.email, &req.password)
-        .await?;
+    state.mail.verify_credentials(&credentials).await?;
 
-    // Check if this IMAP account already belongs to a different user
-    let existing: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT user_id FROM accounts WHERE email = ?")
-            .bind(&req.email)
-            .fetch_optional(&state.db)
-            .await?;
-    if let Some((Some(existing_user_id),)) = &existing {
-        if existing_user_id != &user.user_id {
-            return Err(AppError::Conflict(
-                "This email account is already linked to a different user".into(),
-            ));
-        }
-    }
-
-    // Upsert account in DB, now linked to user
+    // The conditional upsert makes ownership enforcement atomic. Reconnecting
+    // preserves the existing visit/window state.
     let account_id = uuid::Uuid::new_v4().to_string();
-    sqlx::query(
+    // The SMTP columns are legacy schema fields retained for migration
+    // compatibility; the application no longer exposes unused SMTP settings.
+    let result = sqlx::query(
         "INSERT INTO accounts (id, email, imap_host, imap_port, smtp_host, smtp_port, user_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(email) DO UPDATE SET
+         VALUES (?, ?, ?, ?, '', 0, ?)
+         ON CONFLICT DO UPDATE SET
            imap_host = excluded.imap_host,
            imap_port = excluded.imap_port,
-           smtp_host = excluded.smtp_host,
-           smtp_port = excluded.smtp_port,
-           user_id = excluded.user_id,
-           last_open = NULL",
+           user_id = excluded.user_id
+         WHERE accounts.user_id IS NULL OR accounts.user_id = excluded.user_id",
     )
     .bind(&account_id)
-    .bind(&req.email)
+    .bind(&email)
     .bind(&imap_host)
     .bind(imap_port as i64)
-    .bind(&smtp_host)
-    .bind(smtp_port as i64)
     .bind(&user.user_id)
     .execute(&state.db)
     .await?;
 
-    let row: (String,) = sqlx::query_as("SELECT id FROM accounts WHERE email = ?")
-        .bind(&req.email)
+    if result.rows_affected() == 0 {
+        return Err(AppError::Conflict(
+            "This email account is already linked to a different user".into(),
+        ));
+    }
+
+    let row: (String,) = sqlx::query_as("SELECT id FROM accounts WHERE email = ? COLLATE NOCASE")
+        .bind(&email)
         .fetch_one(&state.db)
         .await?;
 
@@ -355,25 +288,20 @@ pub async fn connect(
 
     let account = SessionAccount {
         id: row.0,
-        email: req.email.clone(),
-        password: req.password,
+        email: email.clone(),
+        password: credentials.password,
         imap_host,
         imap_port,
-        smtp_host,
-        smtp_port,
     };
     state.sessions.set_account(&session_token, account).await;
 
     // Ensure the session cookie is set (might be a new token)
-    let session_cookie = Cookie::build((SESSION_COOKIE, session_token))
-        .path("/")
-        .http_only(true)
-        .same_site(axum_extra::extract::cookie::SameSite::Lax);
+    let session_cookie = auth_cookie(SESSION_COOKIE, session_token);
 
     Ok((
         jar.add(session_cookie),
         Json(ConnectResponse {
-            email: req.email,
+            email,
             provider_detected,
         }),
     ))
@@ -396,7 +324,7 @@ pub async fn status(
     Ok(Json(StatusResponse {
         logged_in: user.is_some(),
         email: user.as_ref().map(|u| u.email.clone()),
-        user: user.map(|u| MeResponse {
+        user: user.map(|u| UserResponse {
             user_id: u.user_id,
             email: u.email,
             display_name: u.display_name,
@@ -411,23 +339,23 @@ pub async fn status(
 /// Get the app user from cookies (checks session first, then device token).
 pub async fn get_user_from_jar(state: &AppState, jar: &CookieJar) -> Option<UserSession> {
     // Check in-memory session first
-    if let Some(cookie) = jar.get(SESSION_COOKIE) {
-        if let Some(user) = state.sessions.get_user(cookie.value()).await {
-            return Some(user);
-        }
+    if let Some(cookie) = jar.get(SESSION_COOKIE)
+        && let Some(user) = state.sessions.get_user(cookie.value()).await
+    {
+        return Some(user);
     }
     // Fall back to device token (persistent)
-    if let Some(cookie) = jar.get(DEVICE_COOKIE) {
-        if let Ok(Some(user)) = session::validate_device_token(&state.db, cookie.value()).await {
-            // Hydrate the in-memory session for future requests
-            if let Some(session_cookie) = jar.get(SESSION_COOKIE) {
-                state
-                    .sessions
-                    .set_user(session_cookie.value(), user.clone())
-                    .await;
-            }
-            return Some(user);
+    if let Some(cookie) = jar.get(DEVICE_COOKIE)
+        && let Ok(Some(user)) = session::validate_device_token(&state.db, cookie.value()).await
+    {
+        // Hydrate the in-memory session for future requests
+        if let Some(session_cookie) = jar.get(SESSION_COOKIE) {
+            state
+                .sessions
+                .set_user(session_cookie.value(), user.clone())
+                .await;
         }
+        return Some(user);
     }
     None
 }
@@ -457,4 +385,65 @@ pub async fn require_account(state: &AppState, jar: &CookieJar) -> AppResult<Ses
 
 fn max_age_30_days() -> time::Duration {
     time::Duration::days(30)
+}
+
+fn cookies_secure() -> bool {
+    std::env::var("COOKIE_SECURE")
+        .map(|value| !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no"))
+        .unwrap_or(false)
+}
+
+fn auth_cookie(name: &'static str, value: String) -> Cookie<'static> {
+    Cookie::build((name, value))
+        .path("/")
+        .http_only(true)
+        .secure(cookies_secure())
+        .max_age(max_age_30_days())
+        .same_site(axum_extra::extract::cookie::SameSite::Lax)
+        .build()
+}
+
+fn removal_cookie(name: &'static str) -> Cookie<'static> {
+    Cookie::build(name)
+        .path("/")
+        .http_only(true)
+        .secure(cookies_secure())
+        .same_site(axum_extra::extract::cookie::SameSite::Lax)
+        .build()
+}
+
+async fn issue_session(
+    state: &AppState,
+    jar: CookieJar,
+    user: UserSession,
+) -> AppResult<CookieJar> {
+    if let Some(previous) = jar.get(SESSION_COOKIE) {
+        state.sessions.remove(previous.value()).await;
+    }
+
+    // Keep nine existing devices, then add this one as the guaranteed tenth.
+    session::cleanup_device_tokens(&state.db, &user.user_id, 9).await?;
+    let device_token = session::create_device_token(&state.db, &user.user_id).await?;
+    let session_token = uuid::Uuid::new_v4().to_string();
+    state.sessions.set_user(&session_token, user).await;
+
+    Ok(jar
+        .add(auth_cookie(DEVICE_COOKIE, device_token))
+        .add(auth_cookie(SESSION_COOKIE, session_token)))
+}
+
+fn normalize_email(input: &str) -> AppResult<String> {
+    let email = input.trim().to_lowercase();
+    let Some((local, domain)) = email.split_once('@') else {
+        return Err(AppError::BadRequest("Invalid email address".into()));
+    };
+    if email.len() > 254
+        || local.is_empty()
+        || domain.is_empty()
+        || domain.contains('@')
+        || email.chars().any(char::is_whitespace)
+    {
+        return Err(AppError::BadRequest("Invalid email address".into()));
+    }
+    Ok(email)
 }

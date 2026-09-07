@@ -93,20 +93,16 @@ test.describe('Registration', () => {
     await page.screenshot({ path: 'screenshots/register.png', fullPage: true });
   });
 
-  test('redirects to / if already logged in', async ({ page, request }) => {
+  test('redirects to / if already logged in', async ({ page }) => {
     const authEmail = `redir-${Date.now()}@example.com`;
-    // Register via API to get cookies
-    const response = await request.post('/api/register', {
-      data: { email: authEmail, password: 'password123' },
-    });
-    // Get cookies from the response and set them on the page context
-    const cookies = (await response.headers())['set-cookie'];
-    if (cookies) {
-      // Navigate to register page — should redirect
-      await page.goto('/register');
-      // If logged in via cookies, should redirect to /
-      // Note: API request cookies don't transfer to page context automatically,
-      // so we test this flow via the full auth-flow instead.
-    }
+    await page.goto('/register');
+    await page.locator('input[type="email"]').fill(authEmail);
+    await page.locator('input[type="password"]').first().fill('password123');
+    await page.locator('input[type="password"]').nth(1).fill('password123');
+    await page.locator('button[type="submit"]').click();
+    await expect(page).toHaveURL('/');
+
+    await page.goto('/register');
+    await expect(page).toHaveURL('/');
   });
 });

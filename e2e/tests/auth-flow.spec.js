@@ -39,6 +39,8 @@ test.describe('Full auth flow', () => {
 
     // 8. Should see anonymous landing page
     await expect(page.getByText('Maximum simplicity.', { exact: true })).toBeVisible({ timeout: 5000 });
+    await page.reload();
+    await expect(page.getByText('Maximum simplicity.', { exact: true })).toBeVisible({ timeout: 5000 });
 
     // 9. Sign in again
     await page.locator('nav a', { hasText: 'Sign In' }).click();

@@ -1,6 +1,5 @@
 import { useRef, useEffect, useCallback } from 'react';
 import EmailRow from './EmailRow';
-import { relativeTime } from '../utils/dates';
 
 export default function EmailList({
   emails,
@@ -8,7 +7,6 @@ export default function EmailList({
   refreshing,
   error,
   lastOpen,
-  sinceTimestamp,
   onSelectEmail,
   isRemembered,
   onToggleRemember,
