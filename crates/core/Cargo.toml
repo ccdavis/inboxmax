@@ -8,6 +8,8 @@ license.workspace = true
 [features]
 # Lets web handlers return AppError directly as an HTTP response.
 axum = ["dep:axum"]
+# A generated in-process mailbox for demos and end-to-end tests.
+fake-mail = []
 
 [dependencies]
 axum = { version = "0.8", optional = true, default-features = false }

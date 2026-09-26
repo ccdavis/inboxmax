@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Serve the generated demo mailbox when INBOXMAX_FAKE_MAIL=1 (development and tests).
+fake-mail = ["inboxmax-core/fake-mail"]
+
 [dependencies]
 inboxmax-core = { workspace = true, features = ["axum"] }
 

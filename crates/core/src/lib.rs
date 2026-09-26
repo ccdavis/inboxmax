@@ -7,6 +7,8 @@ pub mod account;
 pub mod config;
 pub mod db;
 pub mod error;
+#[cfg(feature = "fake-mail")]
+pub mod fake_mail;
 pub mod imap_client;
 pub mod mailbox;
 

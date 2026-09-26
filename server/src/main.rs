@@ -1,10 +1,19 @@
-use inboxmax_server::imap_client::RealMailFetcher;
 use inboxmax_server::rate_limit::AttemptLimiter;
 use inboxmax_server::session::SessionStore;
 use inboxmax_server::{AppState, api_router, db};
 use std::sync::Arc;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
+
+#[cfg(feature = "fake-mail")]
+fn mail_fetcher() -> Arc<dyn inboxmax_server::imap_client::MailFetcher> {
+    inboxmax_core::fake_mail::mail_fetcher_from_env()
+}
+
+#[cfg(not(feature = "fake-mail"))]
+fn mail_fetcher() -> Arc<dyn inboxmax_server::imap_client::MailFetcher> {
+    Arc::new(inboxmax_server::imap_client::RealMailFetcher)
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -33,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         db: pool,
         sessions: SessionStore::new(),
-        mail: Arc::new(RealMailFetcher),
+        mail: mail_fetcher(),
         limiter: AttemptLimiter::new(),
     };
 
