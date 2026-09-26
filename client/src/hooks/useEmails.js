@@ -26,7 +26,7 @@ function readStoredSince(key) {
 }
 
 /**
- * Inbox state for one IMAP account: the email window, the "last seen"
+ * Inbox state for one mailbox (`accountKey` is its account id): the email window, the "last seen"
  * watermark, and search results (kept separate so searching never disturbs
  * the inbox window or watermark).
  *
@@ -59,9 +59,14 @@ export function useEmails(accountKey) {
     const requestId = ++fetchRequestRef.current;
     const key = storageKey(accountKey);
     if (cursorRef.current.accountKey !== accountKey) {
+      // Switched mailbox: never show one account's emails under another.
       cursorRef.current = { accountKey, since: null };
       emailsRef.current = [];
+      watermarkRef.current = null;
       manualWatermarkRef.current = false;
+      setEmails([]);
+      setWatermarkUid(null);
+      setLastOpen(null);
     }
     const memorySince = cursorRef.current.since;
     const effectiveSince = isUsableCursor(memorySince) ? memorySince : readStoredSince(key);
@@ -71,7 +76,7 @@ export function useEmails(accountKey) {
     else setLoading(true);
     setError(null);
     try {
-      const data = await api.getEmails(effectiveSince);
+      const data = await api.getEmails(accountKey, effectiveSince);
       if (requestId !== fetchRequestRef.current) return;
       emailsRef.current = data.emails;
       setEmails(data.emails);
@@ -87,7 +92,8 @@ export function useEmails(accountKey) {
       watermarkRef.current = data.watermark_uid ?? null;
       setWatermarkUid(watermarkRef.current);
     } catch (caught) {
-      if (requestId === fetchRequestRef.current) setError(caught);
+      // Tag the failure with its mailbox so callers can tell which one broke.
+      if (requestId === fetchRequestRef.current) setError(Object.assign(caught, { accountId: accountKey }));
     } finally {
       if (requestId === fetchRequestRef.current) {
         setLoading(false);
@@ -97,16 +103,19 @@ export function useEmails(accountKey) {
   }, [accountKey]);
 
   const persistWatermark = useCallback((uid) => {
+    // The loaded emails must belong to this mailbox: after a mailbox is
+    // locked (accountKey null) they are still the previous one's.
+    if (!accountKey || cursorRef.current.accountKey !== accountKey) return Promise.resolve();
     watermarkRef.current = uid;
     setWatermarkUid(uid);
     const save = watermarkQueueRef.current
       .catch(() => undefined)
-      .then(() => api.setWatermark(uid));
+      .then(() => api.setWatermark(accountKey, uid));
     watermarkQueueRef.current = save;
     return save.catch((caught) => {
       setError(new Error(`Could not save the last-seen marker: ${caught.message}`));
     });
-  }, []);
+  }, [accountKey]);
 
   /** The user placed the marker on `uid` (click or arrow keys). */
   const setWatermarkManually = useCallback((uid) => {
@@ -133,14 +142,14 @@ export function useEmails(accountKey) {
     setSearchLoading(true);
     setSearchError(null);
     try {
-      const results = await api.searchEmails(query);
+      const results = await api.searchEmails(accountKey, query);
       if (requestId === searchRequestRef.current) setSearchResults(results);
     } catch (caught) {
       if (requestId === searchRequestRef.current) setSearchError(caught);
     } finally {
       if (requestId === searchRequestRef.current) setSearchLoading(false);
     }
-  }, []);
+  }, [accountKey]);
 
   const clearSearch = useCallback(() => {
     searchRequestRef.current += 1;
@@ -149,17 +158,17 @@ export function useEmails(accountKey) {
     setSearchError(null);
   }, []);
 
-  const clearStoredSince = useCallback(() => {
-    const key = storageKey(accountKey);
-    if (key) {
-      try {
-        sessionStorage.removeItem(key);
-      } catch {
-        // Storage is optional.
+  /** Forget every mailbox's stored window (on sign-out). */
+  const clearStoredCursors = useCallback(() => {
+    try {
+      for (const key of Object.keys(sessionStorage)) {
+        if (key.startsWith(SINCE_PREFIX)) sessionStorage.removeItem(key);
       }
+    } catch {
+      // Storage is optional.
     }
     cursorRef.current = { accountKey: null, since: null };
-  }, [accountKey]);
+  }, []);
 
   return {
     emails,
@@ -176,6 +185,6 @@ export function useEmails(accountKey) {
     searchError,
     search,
     clearSearch,
-    clearStoredSince,
+    clearStoredCursors,
   };
 }

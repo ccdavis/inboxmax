@@ -3,12 +3,13 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{NaiveDate, Utc};
 use http_body_util::BodyExt;
+use inboxmax_core::ConnectedAccount;
 use inboxmax_server::error::{AppError, AppResult};
 use inboxmax_server::imap_client::{
     EmailEnvelope, FullEmail, MailCredentials, MailFetcher, MailboxSnapshot,
 };
 use inboxmax_server::rate_limit::AttemptLimiter;
-use inboxmax_server::session::{SessionAccount, SessionStore};
+use inboxmax_server::session::SessionStore;
 use inboxmax_server::{AppState, api_router};
 use serde_json::Value;
 use sqlx::SqlitePool;
@@ -97,7 +98,7 @@ fn sample_envelopes() -> Vec<EmailEnvelope> {
 
 async fn setup_test_db() -> SqlitePool {
     let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    inboxmax_core::db::MIGRATOR.run(&pool).await.unwrap();
     pool
 }
 
@@ -124,9 +125,9 @@ async fn build_state(envelopes: Vec<EmailEnvelope>) -> AppState {
     seed_account(&pool).await;
     let sessions = SessionStore::new();
     sessions
-        .set_account(
+        .add_account(
             SESSION_TOKEN,
-            SessionAccount {
+            ConnectedAccount {
                 id: ACCOUNT_ID.into(),
                 email: "test@example.com".into(),
                 password: "pass".into(),
@@ -153,7 +154,7 @@ fn emails_request(uri: &str) -> Request<Body> {
 
 fn watermark_request(uid: i64) -> Request<Body> {
     Request::builder()
-        .uri("/api/watermark")
+        .uri(format!("/api/accounts/{ACCOUNT_ID}/watermark"))
         .method("PUT")
         .header("Cookie", format!("inboxmax_session={SESSION_TOKEN}"))
         .header("Content-Type", "application/json")
@@ -193,55 +194,6 @@ async fn get_uid_validity(pool: &SqlitePool) -> Option<i64> {
 }
 
 // ---------------------------------------------------------------------------
-// Unit tests: calculate_since_ms
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod calculate_since_ms_tests {
-    use inboxmax_server::handlers::emails::calculate_since_ms;
-
-    const NOW: i64 = 1_700_000_000_000; // some fixed timestamp
-    const DAY_MS: i64 = 24 * 60 * 60 * 1000;
-    const WEEK_MS: i64 = 7 * DAY_MS;
-
-    #[test]
-    fn explicit_since_wins() {
-        let since = 1_699_000_000_000;
-        assert_eq!(
-            calculate_since_ms(Some(since), Some(NOW - 1000), NOW),
-            since
-        );
-    }
-
-    #[test]
-    fn no_since_no_last_open_returns_24h_ago() {
-        assert_eq!(calculate_since_ms(None, None, NOW), NOW - DAY_MS);
-    }
-
-    #[test]
-    fn no_since_with_recent_last_open() {
-        let last_open = NOW - 3_600_000; // 1 hour ago
-        assert_eq!(calculate_since_ms(None, Some(last_open), NOW), last_open);
-    }
-
-    #[test]
-    fn no_since_with_stale_last_open_falls_back_to_24h() {
-        let stale = NOW - WEEK_MS - 1000; // older than 7 days
-        assert_eq!(calculate_since_ms(None, Some(stale), NOW), NOW - DAY_MS);
-    }
-
-    #[test]
-    fn zero_last_open_falls_back_to_24h() {
-        assert_eq!(calculate_since_ms(None, Some(0), NOW), NOW - DAY_MS);
-    }
-
-    #[test]
-    fn negative_last_open_falls_back_to_24h() {
-        assert_eq!(calculate_since_ms(None, Some(-1), NOW), NOW - DAY_MS);
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Integration tests: last_open behavior
 // ---------------------------------------------------------------------------
 
@@ -253,7 +205,12 @@ async fn list_emails_sets_last_open_on_first_visit() {
     // Verify last_open starts as NULL
     assert!(get_last_open(&state.db).await.is_none());
 
-    let resp = app.oneshot(emails_request("/api/emails")).await.unwrap();
+    let resp = app
+        .oneshot(emails_request(&format!(
+            "/api/accounts/{ACCOUNT_ID}/emails"
+        )))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     // After first fetch, last_open should be set
@@ -270,7 +227,12 @@ async fn list_emails_does_not_update_last_open_on_subsequent_calls() {
 
     // First call: sets last_open
     let app = build_app(state.clone());
-    let resp = app.oneshot(emails_request("/api/emails")).await.unwrap();
+    let resp = app
+        .oneshot(emails_request(&format!(
+            "/api/accounts/{ACCOUNT_ID}/emails"
+        )))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     let first_last_open = get_last_open(&state.db).await.unwrap();
@@ -280,7 +242,12 @@ async fn list_emails_does_not_update_last_open_on_subsequent_calls() {
 
     // Second call: last_open should NOT change
     let app = build_app(state.clone());
-    let resp = app.oneshot(emails_request("/api/emails")).await.unwrap();
+    let resp = app
+        .oneshot(emails_request(&format!(
+            "/api/accounts/{ACCOUNT_ID}/emails"
+        )))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     let second_last_open = get_last_open(&state.db).await.unwrap();
@@ -298,7 +265,9 @@ async fn list_emails_returns_emails_on_repeated_calls() {
     // First call
     let app = build_app(state.clone());
     let resp = app
-        .oneshot(emails_request(&format!("/api/emails?since={since}")))
+        .oneshot(emails_request(&format!(
+            "/api/accounts/{ACCOUNT_ID}/emails?since={since}"
+        )))
         .await
         .unwrap();
     let json = parse_response(resp).await;
@@ -308,7 +277,9 @@ async fn list_emails_returns_emails_on_repeated_calls() {
     // Second call — should still return emails (the bug was returning 0)
     let app = build_app(state.clone());
     let resp = app
-        .oneshot(emails_request(&format!("/api/emails?since={since}")))
+        .oneshot(emails_request(&format!(
+            "/api/accounts/{ACCOUNT_ID}/emails?since={since}"
+        )))
         .await
         .unwrap();
     let json = parse_response(resp).await;
@@ -326,7 +297,9 @@ async fn list_emails_respects_explicit_since_param() {
 
     let since = Utc::now().timestamp_millis() - 3_600_000;
     let resp = app
-        .oneshot(emails_request(&format!("/api/emails?since={since}")))
+        .oneshot(emails_request(&format!(
+            "/api/accounts/{ACCOUNT_ID}/emails?since={since}"
+        )))
         .await
         .unwrap();
     let json = parse_response(resp).await;
@@ -353,7 +326,9 @@ async fn list_emails_filters_imap_day_results_to_the_exact_timestamp() {
     .await;
     let since = (now - chrono::Duration::hours(1)).timestamp_millis();
     let response = build_app(state)
-        .oneshot(emails_request(&format!("/api/emails?since={since}")))
+        .oneshot(emails_request(&format!(
+            "/api/accounts/{ACCOUNT_ID}/emails?since={since}"
+        )))
         .await
         .unwrap();
     let json = parse_response(response).await;
@@ -372,7 +347,9 @@ async fn uid_validity_change_clears_a_stale_watermark() {
         .unwrap();
 
     let response = build_app(state.clone())
-        .oneshot(emails_request("/api/emails"))
+        .oneshot(emails_request(&format!(
+            "/api/accounts/{ACCOUNT_ID}/emails"
+        )))
         .await
         .unwrap();
     let json = parse_response(response).await;
@@ -387,7 +364,12 @@ async fn list_emails_returns_since_timestamp_and_last_open() {
     let state = build_state(sample_envelopes()).await;
     let app = build_app(state.clone());
 
-    let resp = app.oneshot(emails_request("/api/emails")).await.unwrap();
+    let resp = app
+        .oneshot(emails_request(&format!(
+            "/api/accounts/{ACCOUNT_ID}/emails"
+        )))
+        .await
+        .unwrap();
     let json = parse_response(resp).await;
 
     assert!(json["since_timestamp"].is_i64());
@@ -405,7 +387,11 @@ async fn set_watermark_updates_watermark_uid_and_last_open() {
 
     // First, fetch emails to set last_open
     let app = build_app(state.clone());
-    app.oneshot(emails_request("/api/emails")).await.unwrap();
+    app.oneshot(emails_request(&format!(
+        "/api/accounts/{ACCOUNT_ID}/emails"
+    )))
+    .await
+    .unwrap();
     let lo_after_fetch = get_last_open(&state.db).await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -433,9 +419,11 @@ async fn after_watermark_save_list_emails_still_returns_data() {
 
     // First fetch
     let app = build_app(state.clone());
-    app.oneshot(emails_request(&format!("/api/emails?since={since}")))
-        .await
-        .unwrap();
+    app.oneshot(emails_request(&format!(
+        "/api/accounts/{ACCOUNT_ID}/emails?since={since}"
+    )))
+    .await
+    .unwrap();
 
     // Save watermark (simulates tabbing away)
     let app = build_app(state.clone());
@@ -446,7 +434,9 @@ async fn after_watermark_save_list_emails_still_returns_data() {
     // and it doesn't cause an error
     let app = build_app(state.clone());
     let resp = app
-        .oneshot(emails_request(&format!("/api/emails?since={since}")))
+        .oneshot(emails_request(&format!(
+            "/api/accounts/{ACCOUNT_ID}/emails?since={since}"
+        )))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -466,13 +456,23 @@ async fn list_emails_without_session_returns_unauthorized() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/api/emails")
+                .uri(format!("/api/accounts/{ACCOUNT_ID}/emails"))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn accounts_not_connected_in_the_session_are_unauthorized() {
+    let state = build_state(sample_envelopes()).await;
+    let response = build_app(state)
+        .oneshot(emails_request("/api/accounts/some-other-account/emails"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 // ---------------------------------------------------------------------------
@@ -496,7 +496,9 @@ async fn first_uid_validity_observation_keeps_legacy_state_and_bookmarks() {
         .unwrap();
 
     let response = build_app(state.clone())
-        .oneshot(emails_request("/api/emails"))
+        .oneshot(emails_request(&format!(
+            "/api/accounts/{ACCOUNT_ID}/emails"
+        )))
         .await
         .unwrap();
     let json = parse_response(response).await;
@@ -504,7 +506,9 @@ async fn first_uid_validity_observation_keeps_legacy_state_and_bookmarks() {
     assert_eq!(get_uid_validity(&state.db).await, Some(1));
 
     let response = build_app(state.clone())
-        .oneshot(emails_request("/api/remembered"))
+        .oneshot(emails_request(&format!(
+            "/api/accounts/{ACCOUNT_ID}/remembered"
+        )))
         .await
         .unwrap();
     let remembered = parse_response(response).await;
@@ -516,7 +520,9 @@ async fn first_uid_validity_observation_keeps_legacy_state_and_bookmarks() {
 async fn missing_message_returns_not_found() {
     let state = build_state(sample_envelopes()).await;
     let response = build_app(state)
-        .oneshot(emails_request(&format!("/api/emails/{MISSING_UID}")))
+        .oneshot(emails_request(&format!(
+            "/api/accounts/{ACCOUNT_ID}/emails/{MISSING_UID}"
+        )))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);

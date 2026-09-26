@@ -58,7 +58,7 @@ async fn state() -> AppState {
         .connect("sqlite::memory:")
         .await
         .unwrap();
-    sqlx::migrate!("./migrations").run(&db).await.unwrap();
+    inboxmax_core::db::MIGRATOR.run(&db).await.unwrap();
     AppState {
         db,
         sessions: SessionStore::new(),
@@ -174,7 +174,7 @@ async fn a_mailbox_cannot_be_relinked_using_an_email_case_variant() {
     let connect = |cookies: String, email: &'static str| {
         api_router(state.clone()).oneshot(json_request(
             "POST",
-            "/api/connect",
+            "/api/accounts",
             serde_json::json!({
                 "email": email,
                 "password": "mail-password",
@@ -279,7 +279,7 @@ async fn rejected_mailbox_logins_are_rate_limited_per_user() {
     let connect = |password: &'static str| {
         api_router(state.clone()).oneshot(json_request(
             "POST",
-            "/api/connect",
+            "/api/accounts",
             serde_json::json!({
                 "email": "mailbox@example.com",
                 "password": password,
@@ -300,4 +300,211 @@ async fn rejected_mailbox_logins_are_rate_limited_per_user() {
     }
     let blocked = connect("right-password").await.unwrap();
     assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+fn get_request(uri: &str, cookies: &str) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .header(header::COOKIE, cookies)
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// Merge Set-Cookie values from a response into a Cookie header.
+fn merge_cookies(cookies: &str, response: &axum::response::Response) -> String {
+    let mut jar: Vec<(String, String)> = cookies
+        .split("; ")
+        .filter_map(|c| c.split_once('='))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    for value in response.headers().get_all(header::SET_COOKIE) {
+        let pair = value.to_str().unwrap().split(';').next().unwrap();
+        let (name, value) = pair.split_once('=').unwrap();
+        jar.retain(|(k, _)| k != name);
+        jar.push((name.to_string(), value.to_string()));
+    }
+    jar.iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+#[tokio::test]
+async fn a_user_can_connect_list_and_remove_several_mailboxes() {
+    let state = state().await;
+    let (mut cookies, _) = register(&state, "user@example.com").await;
+
+    let mut ids = Vec::new();
+    for mailbox in ["work@example.com", "home@example.com"] {
+        let response = api_router(state.clone())
+            .oneshot(json_request(
+                "POST",
+                "/api/accounts",
+                serde_json::json!({ "email": mailbox, "password": "pw", "imap_host": "imap.example.com" }),
+                Some(&cookies),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        cookies = merge_cookies(&cookies, &response);
+        let body = body_json(response).await;
+        assert_eq!(body["account"]["email"], mailbox);
+        assert_eq!(body["account"]["connected"], true);
+        ids.push(body["account"]["id"].as_str().unwrap().to_string());
+    }
+
+    let listed = body_json(
+        api_router(state.clone())
+            .oneshot(get_request("/api/accounts", &cookies))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let emails: Vec<_> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["email"].clone())
+        .collect();
+    assert_eq!(emails, ["work@example.com", "home@example.com"]);
+    assert!(
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["connected"] == true)
+    );
+
+    // Both mailboxes are readable in the same session.
+    for id in &ids {
+        let response = api_router(state.clone())
+            .oneshot(get_request(&format!("/api/accounts/{id}/emails"), &cookies))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let removed = api_router(state.clone())
+        .oneshot(json_request(
+            "DELETE",
+            &format!("/api/accounts/{}", ids[0]),
+            serde_json::json!({}),
+            Some(&cookies),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(removed.status(), StatusCode::OK);
+    let listed = body_json(
+        api_router(state.clone())
+            .oneshot(get_request("/api/accounts", &cookies))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    let gone = api_router(state.clone())
+        .oneshot(get_request(
+            &format!("/api/accounts/{}/emails", ids[0]),
+            &cookies,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(gone.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn accounts_after_restart_are_listed_but_disconnected() {
+    let state = state().await;
+    let (cookies, _) = register(&state, "user@example.com").await;
+    let response = api_router(state.clone())
+        .oneshot(json_request(
+            "POST",
+            "/api/accounts",
+            serde_json::json!({ "email": "work@example.com", "password": "pw", "imap_host": "imap.example.com" }),
+            Some(&cookies),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // A restart loses the in-memory sessions, but the device cookie still signs the user in.
+    let restarted = AppState {
+        sessions: SessionStore::new(),
+        ..state.clone()
+    };
+    let listed = body_json(
+        api_router(restarted)
+            .oneshot(get_request("/api/accounts", &cookies))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(listed[0]["email"], "work@example.com");
+    assert_eq!(listed[0]["connected"], false);
+}
+
+#[tokio::test]
+async fn accounts_require_a_signed_in_user() {
+    let state = state().await;
+    let response = api_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/accounts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn removing_a_mailbox_disconnects_it_on_every_device() {
+    let state = state().await;
+    let (laptop, _) = register(&state, "user@example.com").await;
+    let phone_response = api_router(state.clone())
+        .oneshot(signin_request("user@example.com", "password123"))
+        .await
+        .unwrap();
+    let phone = merge_cookies("", &phone_response);
+
+    let mut account_id = String::new();
+    let mut cookies = Vec::new();
+    for device in [laptop, phone] {
+        let response = api_router(state.clone())
+            .oneshot(json_request(
+                "POST",
+                "/api/accounts",
+                serde_json::json!({ "email": "work@example.com", "password": "pw", "imap_host": "imap.example.com" }),
+                Some(&device),
+            ))
+            .await
+            .unwrap();
+        let device = merge_cookies(&device, &response);
+        account_id = body_json(response).await["account"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        cookies.push(device);
+    }
+
+    let removed = api_router(state.clone())
+        .oneshot(json_request(
+            "DELETE",
+            &format!("/api/accounts/{account_id}"),
+            serde_json::json!({}),
+            Some(&cookies[0]),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(removed.status(), StatusCode::OK);
+
+    let phone_read = api_router(state.clone())
+        .oneshot(get_request(
+            &format!("/api/accounts/{account_id}/emails"),
+            &cookies[1],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(phone_read.status(), StatusCode::UNAUTHORIZED);
 }

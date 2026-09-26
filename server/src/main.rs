@@ -1,8 +1,6 @@
-use inboxmax_server::imap_client::RealMailFetcher;
 use inboxmax_server::rate_limit::AttemptLimiter;
 use inboxmax_server::session::SessionStore;
 use inboxmax_server::{AppState, api_router, db};
-use std::sync::Arc;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
@@ -12,8 +10,9 @@ async fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "inboxmax_server=debug,tower_http=debug".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "inboxmax_server=debug,inboxmax_core=debug,tower_http=debug".into()
+            }),
         )
         .init();
 
@@ -33,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         db: pool,
         sessions: SessionStore::new(),
-        mail: Arc::new(RealMailFetcher),
+        mail: inboxmax_core::default_mail_fetcher(),
         limiter: AttemptLimiter::new(),
     };
 

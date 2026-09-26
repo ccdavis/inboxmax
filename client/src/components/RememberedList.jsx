@@ -13,6 +13,7 @@ export default function RememberedList({ remembered, selectedUid, onForget, onSe
         expanded={expanded}
         onToggle={() => setExpanded(!expanded)}
         controls={listId}
+        units={['email', 'emails']}
         count={remembered.length}
         className="text-star hover:bg-star-soft"
       >

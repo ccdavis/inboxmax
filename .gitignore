@@ -29,3 +29,7 @@ server/inboxmax_test.db*
 # Misc
 *.png
 !docs/**/*.png
+!desktop/icons/*.png
+
+# Cargo workspace build output
+/target/

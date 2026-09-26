@@ -3,6 +3,8 @@ use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use inboxmax_core::ConnectedAccount;
 use tokio::sync::RwLock;
 
 const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -17,32 +19,12 @@ pub struct UserSession {
     pub display_name: Option<String>,
 }
 
-/// IMAP account connection (temporary, in-memory).
-#[derive(Clone)]
-pub struct SessionAccount {
-    pub id: String,
-    pub email: String,
-    pub password: String,
-    pub imap_host: String,
-    pub imap_port: u16,
-}
-
-impl SessionAccount {
-    pub fn mail_credentials(&self) -> crate::imap_client::MailCredentials {
-        crate::imap_client::MailCredentials {
-            host: self.imap_host.clone(),
-            port: self.imap_port,
-            email: self.email.clone(),
-            password: self.password.clone(),
-        }
-    }
-}
-
-/// Full session: optional user + optional IMAP connection.
-#[derive(Clone)]
+/// Full session: the signed-in user plus the mail accounts connected in it.
+/// Mail passwords live only here, in memory.
+#[derive(Clone, Default)]
 pub struct Session {
     pub user: Option<UserSession>,
-    pub account: Option<SessionAccount>,
+    pub accounts: HashMap<String, ConnectedAccount>,
 }
 
 /// Simple in-memory session store keyed by token.
@@ -72,35 +54,35 @@ impl SessionStore {
     }
 
     pub async fn set_user(&self, token: &str, user: UserSession) {
-        let mut sessions = self.sessions.write().await;
-        Self::prune(&mut sessions, self.ttl);
-        let stored = sessions
-            .entry(token.to_string())
-            .or_insert_with(|| StoredSession {
-                session: Session {
-                    user: None,
-                    account: None,
-                },
-                last_used: Instant::now(),
-            });
-        stored.session.user = Some(user);
-        stored.last_used = Instant::now();
-        Self::enforce_capacity(&mut sessions, self.max_sessions);
+        self.update(token, |session| session.user = Some(user))
+            .await;
     }
 
-    pub async fn set_account(&self, token: &str, account: SessionAccount) {
+    /// Add (or replace) a connected mail account in the session.
+    pub async fn add_account(&self, token: &str, account: ConnectedAccount) {
+        self.update(token, |session| {
+            session.accounts.insert(account.id.clone(), account);
+        })
+        .await;
+    }
+
+    /// Forget a deleted account's password in every session that holds it.
+    pub async fn remove_account_everywhere(&self, account_id: &str) {
+        for stored in self.sessions.write().await.values_mut() {
+            stored.session.accounts.remove(account_id);
+        }
+    }
+
+    async fn update(&self, token: &str, change: impl FnOnce(&mut Session)) {
         let mut sessions = self.sessions.write().await;
         Self::prune(&mut sessions, self.ttl);
         let stored = sessions
             .entry(token.to_string())
             .or_insert_with(|| StoredSession {
-                session: Session {
-                    user: None,
-                    account: None,
-                },
+                session: Session::default(),
                 last_used: Instant::now(),
             });
-        stored.session.account = Some(account);
+        change(&mut stored.session);
         stored.last_used = Instant::now();
         Self::enforce_capacity(&mut sessions, self.max_sessions);
     }
@@ -110,9 +92,18 @@ impl SessionStore {
         Self::get_valid(&mut sessions, token, self.ttl).and_then(|s| s.user.clone())
     }
 
-    pub async fn get_account(&self, token: &str) -> Option<SessionAccount> {
+    pub async fn get_account(&self, token: &str, account_id: &str) -> Option<ConnectedAccount> {
         let mut sessions = self.sessions.write().await;
-        Self::get_valid(&mut sessions, token, self.ttl).and_then(|s| s.account.clone())
+        Self::get_valid(&mut sessions, token, self.ttl)
+            .and_then(|s| s.accounts.get(account_id).cloned())
+    }
+
+    /// Ids of the accounts connected in this session.
+    pub async fn connected_account_ids(&self, token: &str) -> Vec<String> {
+        let mut sessions = self.sessions.write().await;
+        Self::get_valid(&mut sessions, token, self.ttl)
+            .map(|s| s.accounts.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     pub async fn remove(&self, token: &str) {
@@ -271,6 +262,39 @@ mod tests {
         }
     }
 
+    fn account(id: &str) -> inboxmax_core::ConnectedAccount {
+        inboxmax_core::ConnectedAccount {
+            id: id.into(),
+            email: format!("{id}@example.com"),
+            password: "secret".into(),
+            imap_host: "imap.example.com".into(),
+            imap_port: 993,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_holds_several_accounts() {
+        let store = SessionStore::with_limits(Duration::from_secs(60), 10);
+        store.set_user("token", user("one")).await;
+        store.add_account("token", account("a")).await;
+        store.add_account("token", account("b")).await;
+
+        let mut ids = store.connected_account_ids("token").await;
+        ids.sort();
+        assert_eq!(ids, ["a", "b"]);
+        assert!(store.get_user("token").await.is_some(), "user survives");
+
+        store.add_account("other-token", account("a")).await;
+        store.remove_account_everywhere("a").await;
+        assert!(store.get_account("token", "a").await.is_none());
+        assert!(store.get_account("other-token", "a").await.is_none());
+        assert_eq!(
+            store.get_account("token", "b").await.unwrap().email,
+            "b@example.com"
+        );
+        assert!(store.get_account("other-token", "b").await.is_none());
+    }
+
     #[tokio::test]
     async fn expired_sessions_are_removed() {
         let store = SessionStore::with_limits(Duration::ZERO, 10);
@@ -294,7 +318,7 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        sqlx::migrate!("./migrations").run(&db).await.unwrap();
+        inboxmax_core::db::MIGRATOR.run(&db).await.unwrap();
         sqlx::query(
             "INSERT INTO users (id, email, password_hash) VALUES ('user', 'u@example.com', 'x')",
         )

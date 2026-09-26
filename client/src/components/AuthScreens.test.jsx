@@ -6,9 +6,9 @@ import RegisterScreen from './RegisterScreen';
 import ConnectAccount from './ConnectAccount';
 
 vi.mock('../api', () => ({
+  isDesktop: false,
   signin: vi.fn(),
   register: vi.fn(),
-  connect: vi.fn(),
 }));
 
 import * as api from '../api';
@@ -74,14 +74,14 @@ describe('auth screens', () => {
   });
 
   it('connect screen offers sign-out, a port override, and shows notices', async () => {
-    api.connect.mockResolvedValue({ email: 'me@example.com' });
     const onSignOut = vi.fn();
-    const onConnect = vi.fn();
-    renderAt('/connect', <ConnectAccount onConnect={onConnect} onSignOut={onSignOut} notice="Reconnect please" />);
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    renderAt('/connect', <ConnectAccount onSubmit={onSubmit} onSignOut={onSignOut} notice="Reconnect please" />);
 
     expect(screen.getByRole('alert')).toHaveTextContent('Reconnect please');
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     expect(onSignOut).toHaveBeenCalled();
+    expect(screen.queryByRole('checkbox')).toBeNull();
 
     fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'me@example.com' } });
     fireEvent.change(screen.getByLabelText(/^Password/), { target: { value: 'secret' } });
@@ -90,10 +90,31 @@ describe('auth screens', () => {
     fireEvent.change(screen.getByLabelText('Port'), { target: { value: '1993' } });
     fireEvent.click(screen.getByRole('button', { name: 'Connect Email Account' }));
 
-    await vi.waitFor(() => expect(onConnect).toHaveBeenCalledWith('me@example.com'));
-    expect(api.connect).toHaveBeenCalledWith('me@example.com', 'secret', {
+    await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith({
+      email: 'me@example.com',
+      password: 'secret',
       imap_host: 'imap.example.com',
       imap_port: 1993,
-    });
+    }));
+  });
+
+  it('connect screen offers the keychain when passwords can be saved, and shows failures', async () => {
+    const onSubmit = vi.fn().mockRejectedValue(new Error('The mail server rejected this email and password'));
+    const onCancel = vi.fn();
+    renderAt('/connect', (
+      <ConnectAccount onSubmit={onSubmit} onCancel={onCancel} canSavePasswords initialEmail="me@example.com" />
+    ));
+
+    expect(screen.getByLabelText('Email')).toHaveValue('me@example.com');
+    const remember = screen.getByRole('checkbox', { name: /keychain/ });
+    expect(remember).toBeChecked();
+    fireEvent.click(remember);
+    fireEvent.change(screen.getByLabelText(/^Password/), { target: { value: 'nope' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Connect Email Account' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('rejected');
+    expect(onSubmit).toHaveBeenCalledWith({ email: 'me@example.com', password: 'nope', remember: false });
+    fireEvent.click(screen.getByRole('button', { name: 'Back to inbox' }));
+    expect(onCancel).toHaveBeenCalled();
   });
 });

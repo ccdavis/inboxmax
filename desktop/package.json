@@ -1,0 +1,18 @@
+{
+  "name": "inboxmax-desktop",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "dev:demo": "INBOXMAX_FAKE_MAIL=1 tauri dev --features fake-mail",
+    "build": "tauri build",
+    "icons": "tauri icon icons/source.png",
+    "build:test": "tauri build --debug --no-bundle --features fake-mail",
+    "test:e2e": "node --test e2e/*.test.mjs",
+    "inspect:a11y": "node e2e/inspect-a11y.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.0"
+  }
+}

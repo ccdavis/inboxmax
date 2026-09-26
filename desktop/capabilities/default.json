@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The main window. Inbox Max's own commands are always available to it; links are opened by the open_external command, so no opener permissions are granted to the page.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

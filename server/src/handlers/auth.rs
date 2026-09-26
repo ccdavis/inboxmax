@@ -1,13 +1,13 @@
 use crate::AppState;
-use crate::config::{detect_provider, guess_provider};
 use crate::error::{AppError, AppResult};
-use crate::imap_client::MailCredentials;
-use crate::session::{self, SessionAccount, UserSession};
+use crate::session::{self, UserSession};
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use axum::Json;
 use axum::extract::State;
 use axum_extra::extract::cookie::{Cookie, CookieJar};
+use inboxmax_core::ConnectedAccount;
+use inboxmax_core::account::normalize_email;
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
@@ -51,27 +51,11 @@ pub struct SignInRequest {
     pub password: String,
 }
 
-#[derive(Deserialize)]
-pub struct ConnectRequest {
-    pub email: String,
-    pub password: String,
-    pub imap_host: Option<String>,
-    pub imap_port: Option<u16>,
-}
-
-#[derive(Serialize)]
-pub struct ConnectResponse {
-    pub email: String,
-    pub provider_detected: bool,
-}
-
 #[derive(Serialize)]
 pub struct StatusResponse {
     pub logged_in: bool,
     pub email: Option<String>,
     pub user: Option<UserResponse>,
-    pub imap_connected: bool,
-    pub imap_email: Option<String>,
 }
 
 // ---------- Handlers ----------
@@ -235,129 +219,12 @@ pub async fn me(State(state): State<AppState>, jar: CookieJar) -> AppResult<Json
     }))
 }
 
-/// POST /api/connect — connect an IMAP account (requires app auth)
-pub async fn connect(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Json(req): Json<ConnectRequest>,
-) -> AppResult<(CookieJar, Json<ConnectResponse>)> {
-    // Require app-level auth
-    let user = get_user_from_jar(&state, &jar)
-        .await
-        .ok_or(AppError::Unauthorized)?;
-
-    let email = normalize_email(&req.email)?;
-    let custom_host = req
-        .imap_host
-        .as_deref()
-        .map(str::trim)
-        .filter(|host| !host.is_empty())
-        .map(str::to_lowercase);
-    let detected_provider = detect_provider(&email);
-    let provider_detected = detected_provider.is_some() && custom_host.is_none();
-    let provider = detected_provider
-        .or_else(|| guess_provider(&email))
-        .ok_or_else(|| AppError::BadRequest("Unable to determine IMAP host".into()))?;
-    let imap_host = custom_host.unwrap_or(provider.imap_host);
-    let imap_port = req.imap_port.unwrap_or(provider.imap_port);
-    if imap_port == 0 {
-        return Err(AppError::BadRequest("Invalid IMAP port".into()));
-    }
-    let credentials = MailCredentials {
-        host: imap_host.clone(),
-        port: imap_port,
-        email: email.clone(),
-        password: req.password,
-    };
-
-    // Verify credentials by connecting to IMAP. Rejected logins are limited per
-    // user so this endpoint cannot be used to guess mailbox passwords.
-    let limiter_key = format!("connect:{}", user.user_id);
-    state.limiter.check(&limiter_key)?;
-    match state.mail.verify_credentials(&credentials).await {
-        Ok(()) => state.limiter.reset(&limiter_key),
-        Err(error) => {
-            if matches!(error, AppError::MailAuth(_)) {
-                state.limiter.record_failure(&limiter_key);
-            }
-            return Err(error);
-        }
-    }
-
-    // The conditional upsert makes ownership enforcement atomic. Reconnecting
-    // preserves the existing visit/window state.
-    let account_id = uuid::Uuid::new_v4().to_string();
-    // The SMTP columns are legacy schema fields retained for migration
-    // compatibility; the application no longer exposes unused SMTP settings.
-    let result = sqlx::query(
-        "INSERT INTO accounts (id, email, imap_host, imap_port, smtp_host, smtp_port, user_id)
-         VALUES (?, ?, ?, ?, '', 0, ?)
-         ON CONFLICT DO UPDATE SET
-           imap_host = excluded.imap_host,
-           imap_port = excluded.imap_port,
-           user_id = excluded.user_id
-         WHERE accounts.user_id IS NULL OR accounts.user_id = excluded.user_id",
-    )
-    .bind(&account_id)
-    .bind(&email)
-    .bind(&imap_host)
-    .bind(imap_port as i64)
-    .bind(&user.user_id)
-    .execute(&state.db)
-    .await?;
-
-    if result.rows_affected() == 0 {
-        return Err(AppError::Conflict(
-            "This email account is already linked to a different user".into(),
-        ));
-    }
-
-    let row: (String,) = sqlx::query_as("SELECT id FROM accounts WHERE email = ? COLLATE NOCASE")
-        .bind(&email)
-        .fetch_one(&state.db)
-        .await?;
-
-    // Store IMAP credentials in session
-    let session_token = jar
-        .get(SESSION_COOKIE)
-        .map(|c| c.value().to_string())
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-    let account = SessionAccount {
-        id: row.0,
-        email: email.clone(),
-        password: credentials.password,
-        imap_host,
-        imap_port,
-    };
-    state.sessions.set_account(&session_token, account).await;
-
-    // Ensure the session cookie is set (might be a new token)
-    let session_cookie = auth_cookie(SESSION_COOKIE, session_token);
-
-    Ok((
-        jar.add(session_cookie),
-        Json(ConnectResponse {
-            email,
-            provider_detected,
-        }),
-    ))
-}
-
-/// GET /api/auth/status — returns both app auth and IMAP connection status
+/// GET /api/auth/status — whether a user is signed in
 pub async fn status(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> AppResult<Json<StatusResponse>> {
     let user = get_user_from_jar(&state, &jar).await;
-    let account = get_account_from_jar(&state, &jar).await;
-
-    tracing::debug!(
-        "status check: logged_in={}, imap_connected={}",
-        user.is_some(),
-        account.is_some()
-    );
-
     Ok(Json(StatusResponse {
         logged_in: user.is_some(),
         email: user.as_ref().map(|u| u.email.clone()),
@@ -366,8 +233,6 @@ pub async fn status(
             email: u.email,
             display_name: u.display_name,
         }),
-        imap_connected: account.is_some(),
-        imap_email: account.map(|a| a.email),
     }))
 }
 
@@ -397,25 +262,42 @@ pub async fn get_user_from_jar(state: &AppState, jar: &CookieJar) -> Option<User
     None
 }
 
-/// Get IMAP account from session cookie.
-pub async fn get_account_from_jar(state: &AppState, jar: &CookieJar) -> Option<SessionAccount> {
-    let cookie = jar.get(SESSION_COOKIE)?;
-    state.sessions.get_account(cookie.value()).await
+/// Require a signed-in user or return Unauthorized.
+pub async fn require_user(state: &AppState, jar: &CookieJar) -> AppResult<UserSession> {
+    get_user_from_jar(state, jar)
+        .await
+        .ok_or(AppError::Unauthorized)
 }
 
-/// Require IMAP account or return Unauthorized.
-pub async fn require_account(state: &AppState, jar: &CookieJar) -> AppResult<SessionAccount> {
-    let account = get_account_from_jar(state, jar).await;
-    if account.is_none() {
-        let has_session = jar.get(SESSION_COOKIE).is_some();
-        let has_device = jar.get(DEVICE_COOKIE).is_some();
-        tracing::warn!(
-            "require_account failed: no IMAP session (session_cookie={}, device_cookie={})",
-            has_session,
-            has_device
-        );
+/// The session token from the cookie, if any.
+pub fn session_token(jar: &CookieJar) -> Option<String> {
+    jar.get(SESSION_COOKIE).map(|c| c.value().to_string())
+}
+
+/// The session token, creating one (and its cookie) if the browser has none.
+pub fn ensure_session_token(jar: CookieJar) -> (CookieJar, String) {
+    match session_token(&jar) {
+        Some(token) => (jar, token),
+        None => {
+            let token = uuid::Uuid::new_v4().to_string();
+            (jar.add(auth_cookie(SESSION_COOKIE, token.clone())), token)
+        }
     }
-    account.ok_or(AppError::Unauthorized)
+}
+
+/// Require that `account_id` is connected (its password known) in this
+/// session, or return Unauthorized so the client can ask to reconnect.
+pub async fn require_account(
+    state: &AppState,
+    jar: &CookieJar,
+    account_id: &str,
+) -> AppResult<ConnectedAccount> {
+    let token = session_token(jar).ok_or(AppError::Unauthorized)?;
+    state
+        .sessions
+        .get_account(&token, account_id)
+        .await
+        .ok_or(AppError::Unauthorized)
 }
 
 // ---------- Utility ----------
@@ -467,20 +349,4 @@ async fn issue_session(
     Ok(jar
         .add(auth_cookie(DEVICE_COOKIE, device_token))
         .add(auth_cookie(SESSION_COOKIE, session_token)))
-}
-
-fn normalize_email(input: &str) -> AppResult<String> {
-    let email = input.trim().to_lowercase();
-    let Some((local, domain)) = email.split_once('@') else {
-        return Err(AppError::BadRequest("Invalid email address".into()));
-    };
-    if email.len() > 254
-        || local.is_empty()
-        || domain.is_empty()
-        || domain.contains('@')
-        || email.chars().any(char::is_whitespace)
-    {
-        return Err(AppError::BadRequest("Invalid email address".into()));
-    }
-    Ok(email)
 }

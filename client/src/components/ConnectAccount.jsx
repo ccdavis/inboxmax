@@ -2,9 +2,27 @@ import { useState } from 'react';
 import * as api from '../api';
 import { AuthForm, AuthLayout, FormError, FormField, SubmitButton } from './AuthLayout';
 
-export default function ConnectAccount({ onConnect, onSignOut, notice }) {
-  const [email, setEmail] = useState('');
+const LINK_BUTTON =
+  'text-sm text-ink-muted hover:text-ink px-2 py-1 rounded transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500';
+
+/**
+ * Add or reconnect a mailbox. `onSubmit(details)` does the connecting and
+ * throws on failure. Desktop passes `canSavePasswords` to offer saving the
+ * password in the system keychain; the web app keeps it in server memory.
+ */
+export default function ConnectAccount({
+  onSubmit,
+  onCancel,
+  onSignOut,
+  notice,
+  initialEmail = '',
+  title = 'Connect your email',
+  subtitle = 'Connect your IMAP email account to start using Inbox Max.',
+  canSavePasswords = false,
+}) {
+  const [email, setEmail] = useState(initialEmail);
   const [password, setPassword] = useState('');
+  const [remember, setRemember] = useState(true);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -16,30 +34,38 @@ export default function ConnectAccount({ onConnect, onSignOut, notice }) {
     setLoading(true);
     setError(null);
     try {
-      const overrides = {};
-      if (imapHost.trim()) overrides.imap_host = imapHost.trim();
-      if (imapPort) overrides.imap_port = Number(imapPort);
-      const result = await api.connect(email, password, overrides);
-      onConnect(result.email);
+      const details = { email, password };
+      if (imapHost.trim()) details.imap_host = imapHost.trim();
+      if (imapPort) details.imap_port = Number(imapPort);
+      if (canSavePasswords) details.remember = remember;
+      await onSubmit(details);
     } catch (err) {
       setError(err.message);
       setLoading(false);
     }
   };
 
-  return (
-    <AuthLayout
-      title="Connect your email"
-      subtitle="Connect your IMAP email account to start using Inbox Max."
-      topRight={
-        <button
-          type="button"
-          onClick={onSignOut}
-          className="text-sm text-ink-muted hover:text-ink px-2 py-1 rounded transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
-        >
+  const topRight = (onCancel || onSignOut) && (
+    <div className="flex gap-2">
+      {onCancel && (
+        <button type="button" onClick={onCancel} className={LINK_BUTTON}>
+          Back to inbox
+        </button>
+      )}
+      {onSignOut && (
+        <button type="button" onClick={onSignOut} className={LINK_BUTTON}>
           Sign out
         </button>
-      }
+      )}
+    </div>
+  );
+
+  return (
+    <AuthLayout
+      title={title}
+      subtitle={subtitle}
+      logoLinksHome={!api.isDesktop}
+      topRight={topRight}
     >
       <AuthForm onSubmit={handleSubmit}>
         <FormError>{error || notice}</FormError>
@@ -64,6 +90,18 @@ export default function ConnectAccount({ onConnect, onSignOut, notice }) {
           required
           placeholder="Mail or app password"
         />
+
+        {canSavePasswords && (
+          <label className="flex items-start gap-2 text-sm text-ink-soft">
+            <input
+              type="checkbox"
+              checked={remember}
+              onChange={(e) => setRemember(e.target.checked)}
+              className="mt-0.5 h-4 w-4 accent-indigo-600"
+            />
+            <span>Remember the password in this computer's keychain</span>
+          </label>
+        )}
 
         <button
           type="button"
@@ -120,10 +158,17 @@ export default function ConnectAccount({ onConnect, onSignOut, notice }) {
             </a>
             .
           </p>
-          <p>
-            Your mail password is kept only in the server's memory, never on disk, so
-            you'll enter it again after the server restarts.
-          </p>
+          {api.isDesktop ? (
+            <p>
+              Inbox Max connects straight to your mail server. Passwords you choose not
+              to remember are kept only until you quit the app.
+            </p>
+          ) : (
+            <p>
+              Your mail password is kept only in the server's memory, never on disk, so
+              you'll enter it again after the server restarts.
+            </p>
+          )}
         </div>
       </AuthForm>
     </AuthLayout>

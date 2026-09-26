@@ -19,9 +19,18 @@ function useIsMobile() {
 /**
  * App shell: header, a sidebar that is a slide-over drawer on small screens,
  * and the main pane. Sidebar content marks elements that navigate (and so
- * should close the drawer) with `data-closes-sidebar`.
+ * should close the drawer) with `data-closes-sidebar`. The desktop app
+ * passes no `onLogout` and `homeLink={false}`: it has no sign-in or landing page.
  */
-export default function Layout({ email, onLogout, notice, onDismissNotice, sidebar, children }) {
+export default function Layout({
+  email,
+  onLogout,
+  homeLink = true,
+  notice,
+  onDismissNotice,
+  sidebar,
+  children,
+}) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const isMobile = useIsMobile();
   const drawerOpen = isMobile && sidebarOpen;
@@ -71,23 +80,32 @@ export default function Layout({ email, onLogout, notice, onDismissNotice, sideb
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
             </svg>
           </button>
-          <Link
-            to="/"
-            className="flex items-center gap-2 rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
-            aria-label="Inbox Max home"
-          >
-            <LogoMark className="text-xl" />
-            <Wordmark className="text-lg" />
-          </Link>
+          {homeLink ? (
+            <Link
+              to="/"
+              className="flex items-center gap-2 rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+              aria-label="Inbox Max home"
+            >
+              <LogoMark className="text-xl" />
+              <Wordmark className="text-lg" />
+            </Link>
+          ) : (
+            <span className="flex items-center gap-2">
+              <LogoMark className="text-xl" />
+              <Wordmark className="text-lg" />
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-3">
           <span className="text-sm text-ink-muted hidden sm:inline">{email}</span>
-          <button
-            onClick={onLogout}
-            className="text-sm text-ink-muted hover:text-ink px-2 py-1 rounded transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
-          >
-            Sign out
-          </button>
+          {onLogout && (
+            <button
+              onClick={onLogout}
+              className="text-sm text-ink-muted hover:text-ink px-2 py-1 rounded transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+            >
+              Sign out
+            </button>
+          )}
         </div>
       </header>
 

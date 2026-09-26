@@ -111,7 +111,9 @@ describe('EmailReader', () => {
 
     render(<EmailReader emailUid={5} onBack={() => {}} />);
 
-    expect(await screen.findByRole('heading', { name: '(no subject)' })).toHaveFocus();
+    const heading = await screen.findByRole('heading', { name: '(no subject)' });
+    // Focus moves in an effect after the message renders.
+    await waitFor(() => expect(heading).toHaveFocus());
     expect(screen.getByText(/Images in this email are blocked/)).toBeInTheDocument();
     expect(screen.getByText('Hi').closest('.prose')).not.toBeNull();
   });

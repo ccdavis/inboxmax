@@ -1,10 +1,11 @@
-pub mod config;
-pub mod db;
-pub mod error;
+//! Inbox Max web server: multi-user sign-in and sessions in front of the
+//! shared `inboxmax-core` mailbox operations.
+
 pub mod handlers;
-pub mod imap_client;
 pub mod rate_limit;
 pub mod session;
+
+pub use inboxmax_core::{config, db, error, imap_client};
 
 use imap_client::MailFetcher;
 use rate_limit::AttemptLimiter;
@@ -22,30 +23,46 @@ pub struct AppState {
 
 /// Build the complete API router so production and tests exercise the same routes.
 pub fn api_router(state: AppState) -> axum::Router {
-    use axum::routing::{delete, get, post, put};
+    use axum::routing::{get, post, put};
+    use handlers::{accounts, auth, emails, remembered};
 
     axum::Router::new()
-        .route("/api/register", post(handlers::auth::register))
-        .route("/api/signin", post(handlers::auth::signin))
-        .route("/api/signout", post(handlers::auth::signout))
-        .route("/api/me", get(handlers::auth::me))
-        .route("/api/connect", post(handlers::auth::connect))
-        .route("/api/auth/status", get(handlers::auth::status))
-        .route("/api/emails", get(handlers::emails::list_emails))
-        .route("/api/emails/{uid}", get(handlers::emails::get_email))
-        .route("/api/search", get(handlers::emails::search_emails))
-        .route("/api/watermark", put(handlers::emails::set_watermark))
+        .route("/api/register", post(auth::register))
+        .route("/api/signin", post(auth::signin))
+        .route("/api/signout", post(auth::signout))
+        .route("/api/me", get(auth::me))
+        .route("/api/auth/status", get(auth::status))
         .route(
-            "/api/remembered",
-            get(handlers::remembered::list_remembered),
+            "/api/accounts",
+            get(accounts::list_accounts).post(accounts::connect),
         )
         .route(
-            "/api/remembered/{uid}",
-            post(handlers::remembered::remember_email),
+            "/api/accounts/{account_id}",
+            axum::routing::delete(accounts::remove),
         )
         .route(
-            "/api/remembered/{uid}",
-            delete(handlers::remembered::forget_email),
+            "/api/accounts/{account_id}/emails",
+            get(emails::list_emails),
+        )
+        .route(
+            "/api/accounts/{account_id}/emails/{uid}",
+            get(emails::get_email),
+        )
+        .route(
+            "/api/accounts/{account_id}/search",
+            get(emails::search_emails),
+        )
+        .route(
+            "/api/accounts/{account_id}/watermark",
+            put(emails::set_watermark),
+        )
+        .route(
+            "/api/accounts/{account_id}/remembered",
+            get(remembered::list_remembered),
+        )
+        .route(
+            "/api/accounts/{account_id}/remembered/{uid}",
+            post(remembered::remember_email).delete(remembered::forget_email),
         )
         .with_state(state)
 }

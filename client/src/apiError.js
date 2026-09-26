@@ -1,0 +1,8 @@
+/** A failed API call. `message` is human-readable; `status` is HTTP-style. */
+export class ApiError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}

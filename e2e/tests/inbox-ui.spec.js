@@ -24,18 +24,15 @@ async function mockApi(page, { searchResults = [] } = {}) {
     const path = new URL(route.request().url()).pathname;
     const json = (body) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
     if (path === '/api/auth/status') {
-      return json({
-        logged_in: true,
-        email: 'me@example.com',
-        user: { user_id: 'u', email: 'me@example.com', display_name: 'Me' },
-        imap_connected: true,
-        imap_email: 'me@example.com',
-      });
+      return json({ logged_in: true, user: { user_id: 'u', email: 'me@example.com', display_name: 'Me' } });
     }
-    if (path === '/api/emails') {
+    if (path === '/api/accounts') {
+      return json([{ id: 'acct', email: 'me@example.com', connected: true, password_saved: false }]);
+    }
+    if (path === '/api/accounts/acct/emails') {
       return json({ emails: EMAILS, since_timestamp: Date.now() - 6 * DAY, last_open: Date.now() - DAY, watermark_uid: WATERMARK });
     }
-    if (path.startsWith('/api/emails/')) {
+    if (path.startsWith('/api/accounts/acct/emails/')) {
       return json({
         uid: 300,
         subject: 'Formatted',
@@ -46,8 +43,8 @@ async function mockApi(page, { searchResults = [] } = {}) {
         body_text: null,
       });
     }
-    if (path === '/api/search') return json(searchResults);
-    if (path === '/api/remembered') return json([]);
+    if (path === '/api/accounts/acct/search') return json(searchResults);
+    if (path === '/api/accounts/acct/remembered') return json([]);
     return json({ ok: true });
   });
 }
@@ -80,7 +77,9 @@ test('every email appears in the sidebar in a non-English locale', async ({ brow
   const page = await context.newPage();
   await openInbox(page);
   const counts = await page.locator('aside nav button[aria-expanded]').evaluateAll((buttons) =>
-    buttons.map((b) => Number(b.textContent.match(/(\d+)$/)?.[1] ?? 0)),
+    buttons
+      .filter((b) => !b.textContent.startsWith('Mailboxes'))
+      .map((b) => Number(b.textContent.match(/(\d+) emails?$/)?.[1] ?? 0)),
   );
   expect(counts.reduce((a, b) => a + b, 0)).toBe(EMAILS.length);
   await context.close();
