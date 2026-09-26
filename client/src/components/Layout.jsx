@@ -1,35 +1,90 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { LogoMark, Wordmark } from './Logo';
 
-export default function Layout({ email, onLogout, notice, sidebar, children }) {
+const MOBILE_QUERY = '(max-width: 767.98px)'; // below Tailwind's md breakpoint
+
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(() => window.matchMedia?.(MOBILE_QUERY).matches ?? false);
+  useEffect(() => {
+    const media = window.matchMedia?.(MOBILE_QUERY);
+    if (!media) return undefined;
+    const update = () => setIsMobile(media.matches);
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+  return isMobile;
+}
+
+/**
+ * App shell: header, a sidebar that is a slide-over drawer on small screens,
+ * and the main pane. Sidebar content marks elements that navigate (and so
+ * should close the drawer) with `data-closes-sidebar`.
+ */
+export default function Layout({ email, onLogout, notice, onDismissNotice, sidebar, children }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const isMobile = useIsMobile();
+  const drawerOpen = isMobile && sidebarOpen;
+  const openButtonRef = useRef(null);
+  const closeButtonRef = useRef(null);
+  const wasOpenRef = useRef(false);
+
+  // Move focus into the drawer when it opens and back when it closes.
+  useEffect(() => {
+    if (drawerOpen) {
+      closeButtonRef.current?.focus();
+    } else if (wasOpenRef.current && isMobile) {
+      openButtonRef.current?.focus();
+    }
+    wasOpenRef.current = drawerOpen;
+  }, [drawerOpen, isMobile]);
+
+  useEffect(() => {
+    if (!drawerOpen) return undefined;
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') setSidebarOpen(false);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [drawerOpen]);
+
+  const closeOnMobile = () => {
+    if (isMobile) setSidebarOpen(false);
+  };
 
   return (
-    <div className="h-dvh flex flex-col bg-white">
-      {/* Header */}
-      <header className="flex items-center justify-between px-4 py-2 border-b border-slate-200 bg-white shrink-0">
+    <div className="h-dvh flex flex-col bg-canvas">
+      <header
+        className="flex items-center justify-between px-4 py-2 border-b border-line bg-canvas shrink-0"
+        inert={drawerOpen}
+      >
         <div className="flex items-center gap-2">
           <button
+            ref={openButtonRef}
             onClick={() => setSidebarOpen(true)}
-            className="md:hidden p-2 -ml-2 text-slate-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
+            className="md:hidden p-2 -ml-2 text-ink-soft focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
             aria-label="Open sidebar"
+            aria-expanded={drawerOpen}
+            aria-controls="sidebar"
           >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
             </svg>
           </button>
-          <span className="text-xl font-bold bg-gradient-to-r from-indigo-500 to-violet-500 bg-clip-text text-transparent" aria-hidden="true">
-            Μ
-          </span>
-          <h1 className="text-lg tracking-tight text-slate-900">
-            <span className="font-light">Inbox</span>
-            <span className="font-bold"> Max</span>
-          </h1>
+          <Link
+            to="/"
+            className="flex items-center gap-2 rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+            aria-label="Inbox Max home"
+          >
+            <LogoMark className="text-xl" />
+            <Wordmark className="text-lg" />
+          </Link>
         </div>
         <div className="flex items-center gap-3">
-          <span className="text-sm text-slate-500 hidden sm:inline">{email}</span>
+          <span className="text-sm text-ink-muted hidden sm:inline">{email}</span>
           <button
             onClick={onLogout}
-            className="text-xs text-slate-400 hover:text-slate-600 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
+            className="text-sm text-ink-muted hover:text-ink px-2 py-1 rounded transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
           >
             Sign out
           </button>
@@ -37,43 +92,50 @@ export default function Layout({ email, onLogout, notice, sidebar, children }) {
       </header>
 
       {notice && (
-        <div role="alert" className="bg-red-50 text-red-700 text-sm px-4 py-2 border-b border-red-100">
-          {notice}
+        <div role="alert" className="flex items-start justify-between gap-3 bg-danger-bg text-danger-ink text-sm px-4 py-2 border-b border-danger-line">
+          <span>{notice}</span>
+          {onDismissNotice && (
+            <button
+              onClick={onDismissNotice}
+              className="shrink-0 rounded px-1 hover:opacity-70 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+              aria-label="Dismiss message"
+            >
+              {'✕'}
+            </button>
+          )}
         </div>
       )}
 
-      {/* Body */}
-      <div className="flex flex-1 overflow-hidden relative">
-        {/* Mobile backdrop */}
-        {sidebarOpen && (
+      <div className="flex flex-1 min-h-0 relative">
+        {drawerOpen && (
           <div
-            className="fixed inset-0 z-30 bg-black/30 md:hidden"
+            className="fixed inset-0 z-30 bg-black/40"
             onClick={() => setSidebarOpen(false)}
             aria-hidden="true"
           />
         )}
 
-        {/* Sidebar */}
         <aside
+          id="sidebar"
           className={`
-            fixed inset-y-0 left-0 z-40 w-72 bg-white border-r border-slate-200 transform transition-transform duration-200 ease-in-out overflow-hidden
-            md:static md:translate-x-0 md:w-64 md:shrink-0
+            fixed inset-y-0 left-0 z-40 w-72 max-w-[85vw] flex flex-col bg-canvas-subtle border-r border-line
+            transform transition-transform duration-200 ease-in-out
+            md:static md:z-auto md:translate-x-0 md:w-64 md:shrink-0
             ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
           `}
           aria-label="Sidebar"
+          inert={isMobile && !sidebarOpen}
           onClick={(e) => {
-            // Auto-close sidebar on mobile when an interactive element is clicked
-            if (window.innerWidth < 768 && e.target.closest('button, a')) {
-              setSidebarOpen(false);
-            }
+            if (e.target.closest('[data-closes-sidebar]')) closeOnMobile();
           }}
+          onSubmit={closeOnMobile}
         >
-          {/* Mobile close button */}
-          <div className="md:hidden flex items-center justify-between px-3 py-2 border-b border-slate-200">
-            <span className="text-sm font-medium text-slate-700">Menu</span>
+          <div className="md:hidden flex items-center justify-between px-3 py-2 border-b border-line shrink-0">
+            <span className="text-sm font-medium text-ink-soft">Menu</span>
             <button
+              ref={closeButtonRef}
               onClick={() => setSidebarOpen(false)}
-              className="p-2 text-slate-400 hover:text-slate-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
+              className="p-2 text-ink-muted hover:text-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
               aria-label="Close sidebar"
             >
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
@@ -84,8 +146,7 @@ export default function Layout({ email, onLogout, notice, sidebar, children }) {
           {sidebar}
         </aside>
 
-        {/* Main content */}
-        <main className="flex-1 overflow-hidden">
+        <main className="flex-1 min-w-0 overflow-hidden" inert={drawerOpen}>
           {children}
         </main>
       </div>

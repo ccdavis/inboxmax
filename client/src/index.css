@@ -1,6 +1,81 @@
 @import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+/*
+ * Semantic colors. Components use these (bg-canvas, text-ink, border-line, ...)
+ * instead of raw palette shades so light and dark mode stay in step. Values
+ * are the Tailwind palette; dark overrides follow the system preference.
+ */
+@theme {
+  --color-canvas: oklch(100% 0 0); /* white: app and main pane background */
+  --color-canvas-subtle: oklch(98.4% 0.003 247.858); /* slate-50: sidebar, page wash */
+  --color-canvas-deep: oklch(96.8% 0.007 247.896); /* slate-100: page wash end */
+  --color-surface: oklch(100% 0 0); /* white: cards */
+  --color-field: oklch(98.4% 0.003 247.858); /* slate-50: form inputs */
+  --color-hover: oklch(96.8% 0.007 247.896); /* slate-100 */
+  --color-line: oklch(92.9% 0.013 255.508); /* slate-200 */
+  --color-line-subtle: oklch(96.8% 0.007 247.896); /* slate-100 */
+  --color-ink: oklch(20.8% 0.042 265.755); /* slate-900: primary text */
+  --color-ink-soft: oklch(37.2% 0.044 257.287); /* slate-700 */
+  --color-ink-muted: oklch(55.4% 0.046 257.417); /* slate-500: secondary text, AA on white */
+  --color-ink-faint: oklch(70.4% 0.04 256.788); /* slate-400: icons and placeholders only */
+  --color-accent: oklch(51.1% 0.262 276.966); /* indigo-600: links */
+  --color-accent-hover: oklch(45.7% 0.24 277.023); /* indigo-700 */
+  --color-accent-soft: oklch(96.2% 0.018 272.314); /* indigo-50 */
+  --color-star: oklch(66.6% 0.179 58.318); /* amber-600 */
+  --color-star-soft: oklch(98.7% 0.022 95.277); /* amber-50 */
+  --color-danger-bg: oklch(97.1% 0.013 17.38); /* red-50 */
+  --color-danger-ink: oklch(50.5% 0.213 27.518); /* red-700 */
+  --color-danger-line: oklch(93.6% 0.032 17.717); /* red-100 */
+
+  /* Email list states: seen rows are quietly greyed out, the last-seen marker stands out. */
+  --color-seen: oklch(96.8% 0.007 247.896); /* slate-100 */
+  --color-seen-hover: oklch(92.9% 0.013 255.508); /* slate-200 */
+  --color-marker: oklch(93% 0.034 272.788); /* indigo-100 */
+  --color-marker-hover: oklch(87% 0.065 274.039); /* indigo-200 */
+  --color-marker-line: oklch(67.3% 0.182 276.935); /* indigo-400 */
+  --color-selected: oklch(96.2% 0.018 272.314); /* indigo-50 */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-canvas: oklch(12.9% 0.042 264.695); /* slate-950 */
+    --color-canvas-subtle: oklch(20.8% 0.042 265.755); /* slate-900 */
+    --color-canvas-deep: oklch(12.9% 0.042 264.695); /* slate-950 */
+    --color-surface: oklch(20.8% 0.042 265.755); /* slate-900 */
+    --color-field: oklch(27.9% 0.041 260.031); /* slate-800 */
+    --color-hover: oklch(27.9% 0.041 260.031); /* slate-800 */
+    --color-line: oklch(27.9% 0.041 260.031); /* slate-800 */
+    --color-line-subtle: oklch(20.8% 0.042 265.755); /* slate-900 */
+    --color-ink: oklch(96.8% 0.007 247.896); /* slate-100 */
+    --color-ink-soft: oklch(86.9% 0.022 252.894); /* slate-300 */
+    --color-ink-muted: oklch(70.4% 0.04 256.788); /* slate-400 */
+    --color-ink-faint: oklch(55.4% 0.046 257.417); /* slate-500 */
+    --color-accent: oklch(67.3% 0.182 276.935); /* indigo-400 */
+    --color-accent-hover: oklch(78.5% 0.115 274.713); /* indigo-300 */
+    --color-accent-soft: oklch(25.7% 0.09 281.288); /* indigo-950 */
+    --color-star: oklch(82.8% 0.189 84.429); /* amber-400 */
+    --color-star-soft: oklch(27.9% 0.077 45.635); /* amber-950 */
+    --color-danger-bg: oklch(25.8% 0.092 26.042); /* red-950 */
+    --color-danger-ink: oklch(80.8% 0.114 19.571); /* red-300 */
+    --color-danger-line: oklch(39.6% 0.141 25.723); /* red-900 */
+
+    --color-seen: oklch(20.8% 0.042 265.755); /* slate-900 */
+    --color-seen-hover: oklch(27.9% 0.041 260.031); /* slate-800 */
+    --color-marker: oklch(25.7% 0.09 281.288); /* indigo-950 */
+    --color-marker-hover: oklch(35.9% 0.144 278.697); /* indigo-900 */
+    --color-marker-line: oklch(58.5% 0.233 277.117); /* indigo-500 */
+    --color-selected: oklch(25.7% 0.09 281.288); /* indigo-950 */
+  }
+}
+
+:root {
+  color-scheme: light dark;
+}
 
 body {
   margin: 0;
   min-height: 100dvh;
+  background-color: var(--color-canvas);
+  color: var(--color-ink);
 }

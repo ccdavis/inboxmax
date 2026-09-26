@@ -124,13 +124,14 @@ pub struct FullEmail {
     pub message_id: Option<String>,
 }
 
-/// Connect to an IMAP server and return an authenticated session.
+/// Bound an entire mail operation (connect, login, and commands) by one deadline.
 async fn run_with_timeout<T>(future: impl Future<Output = AppResult<T>>) -> AppResult<T> {
     timeout(MAIL_OPERATION_TIMEOUT, future)
         .await
         .map_err(|_| AppError::Imap("Mail operation timed out".into()))?
 }
 
+/// Connect to an IMAP server and return an authenticated session.
 pub async fn connect(credentials: &MailCredentials) -> AppResult<ImapSession> {
     let address = resolve_public_address(&credentials.host, credentials.port).await?;
     let tcp = timeout(CONNECT_TIMEOUT, TcpStream::connect(address))
@@ -156,7 +157,7 @@ pub async fn connect(credentials: &MailCredentials) -> AppResult<ImapSession> {
     )
     .await
     .map_err(|_| AppError::Imap("Login timed out".into()))?
-    .map_err(|(e, _client)| AppError::Imap(format!("Login failed: {e}")))?;
+    .map_err(|(e, _client)| AppError::MailAuth(e.to_string()))?;
 
     Ok(session)
 }
@@ -220,6 +221,10 @@ pub async fn fetch_email_by_uid(session: &mut ImapSession, uid: u32) -> AppResul
         .await
         .map_err(|e| AppError::Imap(format!("SELECT INBOX failed: {e}")))?;
 
+    // BODY[] (rather than BODY.PEEK[]) deliberately sets \Seen on the server:
+    // opening a message counts as reading it, as in other mail clients. The
+    // app's own "seen" marker is independent and tracks headers the user has
+    // scanned in the list.
     let messages = session
         .uid_fetch(uid.to_string(), "(UID ENVELOPE BODY[])")
         .await
@@ -230,9 +235,11 @@ pub async fn fetch_email_by_uid(session: &mut ImapSession, uid: u32) -> AppResul
         .await
         .map_err(|e| AppError::Imap(format!("FETCH stream failed: {e}")))?;
 
+    // Servers may interleave unsolicited FETCH responses for other messages.
     let msg = collected
-        .first()
-        .ok_or_else(|| AppError::Imap("Message not found".into()))?;
+        .iter()
+        .find(|msg| msg.uid == Some(uid))
+        .ok_or_else(|| AppError::NotFound("Message not found".into()))?;
 
     let body_raw = msg.body().unwrap_or_default();
     let parsed = mail_parser::MessageParser::default()
@@ -244,8 +251,8 @@ pub async fn fetch_email_by_uid(session: &mut ImapSession, uid: u32) -> AppResul
         .ok_or_else(|| AppError::Imap("No envelope".into()))?;
 
     Ok(FullEmail {
-        uid: msg.uid.unwrap_or(uid),
-        subject: cow_bytes_to_string(envelope.subject.as_ref()),
+        uid,
+        subject: decode_header_text(envelope.subject.as_ref()),
         from: format_addresses(envelope.from.as_ref()),
         to: format_addresses(envelope.to.as_ref()),
         date: parse_imap_date(envelope.date.as_ref()),
@@ -265,8 +272,7 @@ pub async fn search_emails(
         .await
         .map_err(|e| AppError::Imap(format!("SELECT INBOX failed: {e}")))?;
 
-    let sanitized = sanitize_imap_query(query);
-    let search_query = format!("OR SUBJECT \"{}\" FROM \"{}\"", sanitized, sanitized);
+    let search_query = build_search_query(query);
 
     let uids = session
         .uid_search(&search_query)
@@ -307,7 +313,7 @@ fn parse_envelope(msg: &Fetch) -> Option<EmailEnvelope> {
 
     Some(EmailEnvelope {
         uid,
-        subject: cow_bytes_to_string(envelope.subject.as_ref()),
+        subject: decode_header_text(envelope.subject.as_ref()),
         from: format_addresses(envelope.from.as_ref()),
         date: parse_imap_date(envelope.date.as_ref()),
     })
@@ -358,14 +364,29 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
     if let Some(ipv4) = ip.to_ipv4() {
         return is_public_ipv4(ipv4);
     }
-    let first = ip.segments()[0];
+    let segments = ip.segments();
+    let embedded_ipv4 = |high: u16, low: u16| {
+        Ipv4Addr::new((high >> 8) as u8, high as u8, (low >> 8) as u8, low as u8)
+    };
+    // NAT64 (64:ff9b::/96) and 6to4 (2002::/16) addresses route to an embedded
+    // IPv4 address, which must itself be public.
+    if segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        return is_public_ipv4(embedded_ipv4(segments[6], segments[7]));
+    }
+    if segments[0] == 0x2002 {
+        return is_public_ipv4(embedded_ipv4(segments[1], segments[2]));
+    }
+    let first = segments[0];
     !(ip.is_loopback()
         || ip.is_unspecified()
         || ip.is_multicast()
         || (first & 0xfe00) == 0xfc00
         || (first & 0xffc0) == 0xfe80
         || (first & 0xffc0) == 0xfec0
-        || (ip.segments()[0] == 0x2001 && ip.segments()[1] == 0x0db8))
+        // Local-use NAT64 (64:ff9b:1::/48) can translate to private networks.
+        || (first == 0x64 && segments[1] == 0xff9b && segments[2] == 1)
+        // Teredo tunnels (2001::/32) and documentation (2001:db8::/32).
+        || (first == 0x2001 && (segments[1] == 0 || segments[1] == 0x0db8)))
 }
 
 fn newest_uid_strings(uids: impl IntoIterator<Item = u32>, limit: usize) -> Vec<String> {
@@ -377,12 +398,28 @@ fn newest_uid_strings(uids: impl IntoIterator<Item = u32>, limit: usize) -> Vec<
         .collect()
 }
 
-/// Convert Cow<[u8]> to String (IMAP envelope fields are bytes).
-fn cow_bytes_to_string(cow: Option<&std::borrow::Cow<'_, [u8]>>) -> String {
-    match cow {
-        Some(bytes) => String::from_utf8_lossy(bytes).to_string(),
-        None => String::new(),
+/// Decode an IMAP envelope text field. Envelopes carry raw header bytes, so
+/// non-ASCII text arrives as RFC 2047 encoded-words (`=?UTF-8?B?...?=`).
+fn decode_header_text(raw: Option<&std::borrow::Cow<'_, [u8]>>) -> String {
+    let Some(raw) = raw else {
+        return String::new();
+    };
+    let text = String::from_utf8_lossy(raw);
+    if !text.contains("=?") {
+        return text.trim().to_string();
     }
+    // mail-parser only exposes its RFC 2047 decoder through header parsing, so
+    // parse a one-line synthetic message. Line breaks are stripped first so the
+    // value cannot inject further headers.
+    let unfolded: String = text
+        .chars()
+        .map(|c| if c == '\r' || c == '\n' { ' ' } else { c })
+        .collect();
+    let synthetic = format!("Subject: {unfolded}\r\n\r\n");
+    mail_parser::MessageParser::default()
+        .parse(synthetic.as_bytes())
+        .and_then(|message| message.subject().map(|s| s.trim().to_string()))
+        .unwrap_or_else(|| unfolded.trim().to_string())
 }
 
 fn format_addresses(addrs: Option<&Vec<imap_proto::types::Address<'_>>>) -> String {
@@ -392,10 +429,7 @@ fn format_addresses(addrs: Option<&Vec<imap_proto::types::Address<'_>>>) -> Stri
     addrs
         .iter()
         .map(|a| {
-            let name = a
-                .name
-                .as_ref()
-                .map(|n| String::from_utf8_lossy(n).to_string());
+            let name = Some(decode_header_text(a.name.as_ref())).filter(|n| !n.is_empty());
             let mailbox = a
                 .mailbox
                 .as_ref()
@@ -406,14 +440,26 @@ fn format_addresses(addrs: Option<&Vec<imap_proto::types::Address<'_>>>) -> Stri
                 .as_ref()
                 .map(|h| String::from_utf8_lossy(h).to_string())
                 .unwrap_or_default();
-            if let Some(name) = name {
-                name
-            } else {
-                format!("{mailbox}@{host}")
+            match (name, host.is_empty()) {
+                (Some(name), _) => name,
+                (None, true) => mailbox,
+                (None, false) => format!("{mailbox}@{host}"),
             }
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Build the SEARCH criteria for a subject-or-sender query. Non-ASCII terms
+/// need an explicit CHARSET or many servers reject the command.
+fn build_search_query(query: &str) -> String {
+    let sanitized = sanitize_imap_query(query);
+    let criteria = format!("OR SUBJECT \"{sanitized}\" FROM \"{sanitized}\"");
+    if sanitized.is_ascii() {
+        criteria
+    } else {
+        format!("CHARSET UTF-8 {criteria}")
+    }
 }
 
 /// Sanitize user input for use inside IMAP quoted strings.
@@ -437,7 +483,8 @@ fn parse_imap_date(date: Option<&std::borrow::Cow<'_, [u8]>>) -> Option<DateTime
 
 #[cfg(test)]
 mod tests {
-    use super::{is_public_ip, newest_uid_strings};
+    use super::{build_search_query, decode_header_text, is_public_ip, newest_uid_strings};
+    use std::borrow::Cow;
     use std::net::IpAddr;
 
     #[test]
@@ -453,6 +500,13 @@ mod tests {
             "fe80::1",
             "::ffff:127.0.0.1",
             "::127.0.0.1",
+            "64:ff9b::7f00:1",
+            "64:ff9b::a00:1",
+            "64:ff9b:1::1",
+            "2002:7f00:1::",
+            "2002:c0a8:101::1",
+            "2001::1",
+            "2001:db8::1",
         ] {
             assert!(
                 !is_public_ip(address.parse::<IpAddr>().unwrap()),
@@ -461,6 +515,41 @@ mod tests {
         }
         assert!(is_public_ip("8.8.8.8".parse().unwrap()));
         assert!(is_public_ip("2606:4700:4700::1111".parse().unwrap()));
+        assert!(is_public_ip("64:ff9b::808:808".parse().unwrap()));
+        assert!(is_public_ip("2002:808:808::1".parse().unwrap()));
+    }
+
+    fn decode(raw: &str) -> String {
+        decode_header_text(Some(&Cow::Borrowed(raw.as_bytes())))
+    }
+
+    #[test]
+    fn decodes_rfc2047_encoded_words() {
+        assert_eq!(decode("=?UTF-8?B?SGVsbG8gV8O2cmxk?="), "Hello Wörld");
+        assert_eq!(decode("=?ISO-8859-1?Q?Caf=E9?= menu"), "Café menu");
+        assert_eq!(decode("Plain subject"), "Plain subject");
+        assert_eq!(decode(""), "");
+        assert_eq!(decode_header_text(None), "");
+    }
+
+    #[test]
+    fn decoding_cannot_inject_extra_headers() {
+        assert_eq!(
+            decode("=?UTF-8?Q?Hi?=\r\nFrom: evil@example.com"),
+            "Hi From: evil@example.com"
+        );
+    }
+
+    #[test]
+    fn non_ascii_search_declares_a_charset() {
+        assert_eq!(
+            build_search_query("invoice"),
+            "OR SUBJECT \"invoice\" FROM \"invoice\""
+        );
+        assert_eq!(
+            build_search_query("café \"x\""),
+            "CHARSET UTF-8 OR SUBJECT \"café x\" FROM \"café x\""
+        );
     }
 
     #[test]

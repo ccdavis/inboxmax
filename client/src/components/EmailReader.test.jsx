@@ -97,4 +97,33 @@ describe('EmailReader', () => {
       expect(screen.getByText('Just plain text content')).toBeInTheDocument();
     });
   });
+
+  it('falls back to "(no subject)" and notes blocked images', async () => {
+    api.getEmail.mockResolvedValue({
+      uid: 5,
+      subject: '',
+      from: 'sender@example.com',
+      to: 'me@example.com',
+      date: null,
+      body_html: '<p>Hi</p><img src="https://tracker.test/pixel">',
+      body_text: null,
+    });
+
+    render(<EmailReader emailUid={5} onBack={() => {}} />);
+
+    expect(await screen.findByRole('heading', { name: '(no subject)' })).toHaveFocus();
+    expect(screen.getByText(/Images in this email are blocked/)).toBeInTheDocument();
+    expect(screen.getByText('Hi').closest('.prose')).not.toBeNull();
+  });
+
+  it('shows load errors with a way back', async () => {
+    api.getEmail.mockRejectedValue(new Error('Message not found'));
+    const onBack = vi.fn();
+    render(<EmailReader emailUid={6} onBack={onBack} />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Message not found');
+    screen.getByRole('button', { name: /Back/ }).click();
+    expect(onBack).toHaveBeenCalled();
+  });
 });
+

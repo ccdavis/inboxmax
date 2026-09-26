@@ -10,10 +10,24 @@ use axum::extract::State;
 use axum_extra::extract::cookie::{Cookie, CookieJar};
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 
 const SESSION_COOKIE: &str = "inboxmax_session";
 const DEVICE_COOKIE: &str = "inboxmax_device";
-const MAX_PASSWORD_LEN: usize = 256;
+const MIN_PASSWORD_CHARS: usize = 8;
+const MAX_PASSWORD_CHARS: usize = 256;
+
+/// Verified when an email has no account, so sign-in takes the same time
+/// whether or not the account exists.
+static DUMMY_PASSWORD_HASH: LazyLock<String> = LazyLock::new(|| {
+    Argon2::default()
+        .hash_password(
+            b"inboxmax-dummy-password",
+            &SaltString::generate(&mut OsRng),
+        )
+        .expect("hashing a constant password cannot fail")
+        .to_string()
+});
 
 // ---------- Request / Response types ----------
 
@@ -74,14 +88,15 @@ pub async fn register(
             "Email and password are required".into(),
         ));
     }
-    if req.password.len() < 8 {
-        return Err(AppError::BadRequest(
-            "Password must be at least 8 characters".into(),
-        ));
-    }
-    if req.password.len() > MAX_PASSWORD_LEN {
+    let password_chars = req.password.chars().count();
+    if password_chars < MIN_PASSWORD_CHARS {
         return Err(AppError::BadRequest(format!(
-            "Password must be at most {MAX_PASSWORD_LEN} characters"
+            "Password must be at least {MIN_PASSWORD_CHARS} characters"
+        )));
+    }
+    if password_chars > MAX_PASSWORD_CHARS {
+        return Err(AppError::BadRequest(format!(
+            "Password must be at most {MAX_PASSWORD_CHARS} characters"
         )));
     }
 
@@ -141,10 +156,13 @@ pub async fn signin(
     jar: CookieJar,
     Json(req): Json<SignInRequest>,
 ) -> AppResult<(CookieJar, Json<UserResponse>)> {
-    let email = normalize_email(&req.email).map_err(|_| AppError::Unauthorized)?;
+    let email = normalize_email(&req.email).map_err(|_| AppError::InvalidCredentials)?;
+    let limiter_key = format!("signin:{email}");
+    state.limiter.check(&limiter_key)?;
 
-    if req.password.len() > MAX_PASSWORD_LEN {
-        return Err(AppError::Unauthorized);
+    if req.password.chars().count() > MAX_PASSWORD_CHARS {
+        state.limiter.record_failure(&limiter_key);
+        return Err(AppError::InvalidCredentials);
     }
 
     let row: Option<(String, String, Option<String>)> =
@@ -153,14 +171,20 @@ pub async fn signin(
             .fetch_optional(&state.db)
             .await?;
 
-    let (user_id, password_hash, display_name) = row.ok_or(AppError::Unauthorized)?;
-
-    // Verify password
-    let parsed_hash = PasswordHash::new(&password_hash)
+    let stored_hash = row
+        .as_ref()
+        .map_or(DUMMY_PASSWORD_HASH.as_str(), |(_, hash, _)| hash.as_str());
+    let parsed_hash = PasswordHash::new(stored_hash)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Hash parse error: {e}")))?;
-    Argon2::default()
+    let password_ok = Argon2::default()
         .verify_password(req.password.as_bytes(), &parsed_hash)
-        .map_err(|_| AppError::Unauthorized)?;
+        .is_ok();
+
+    let Some((user_id, _, display_name)) = row.filter(|_| password_ok) else {
+        state.limiter.record_failure(&limiter_key);
+        return Err(AppError::InvalidCredentials);
+    };
+    state.limiter.reset(&limiter_key);
 
     let user = UserSession {
         user_id: user_id.clone(),
@@ -223,16 +247,18 @@ pub async fn connect(
         .ok_or(AppError::Unauthorized)?;
 
     let email = normalize_email(&req.email)?;
+    let custom_host = req
+        .imap_host
+        .as_deref()
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(str::to_lowercase);
     let detected_provider = detect_provider(&email);
-    let provider_detected = detected_provider.is_some() && req.imap_host.is_none();
+    let provider_detected = detected_provider.is_some() && custom_host.is_none();
     let provider = detected_provider
         .or_else(|| guess_provider(&email))
         .ok_or_else(|| AppError::BadRequest("Unable to determine IMAP host".into()))?;
-    let imap_host = req
-        .imap_host
-        .filter(|host| !host.trim().is_empty())
-        .map(|host| host.trim().to_lowercase())
-        .unwrap_or(provider.imap_host);
+    let imap_host = custom_host.unwrap_or(provider.imap_host);
     let imap_port = req.imap_port.unwrap_or(provider.imap_port);
     if imap_port == 0 {
         return Err(AppError::BadRequest("Invalid IMAP port".into()));
@@ -244,8 +270,19 @@ pub async fn connect(
         password: req.password,
     };
 
-    // Verify credentials by connecting to IMAP
-    state.mail.verify_credentials(&credentials).await?;
+    // Verify credentials by connecting to IMAP. Rejected logins are limited per
+    // user so this endpoint cannot be used to guess mailbox passwords.
+    let limiter_key = format!("connect:{}", user.user_id);
+    state.limiter.check(&limiter_key)?;
+    match state.mail.verify_credentials(&credentials).await {
+        Ok(()) => state.limiter.reset(&limiter_key),
+        Err(error) => {
+            if matches!(error, AppError::MailAuth(_)) {
+                state.limiter.record_failure(&limiter_key);
+            }
+            return Err(error);
+        }
+    }
 
     // The conditional upsert makes ownership enforcement atomic. Reconnecting
     // preserves the existing visit/window state.

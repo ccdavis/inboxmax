@@ -114,7 +114,11 @@ pub async fn list_emails(
     });
 
     let fetched_uid_validity = snapshot.uid_validity.map(i64::from);
-    if fetched_uid_validity != stored_uid_validity {
+    // A changed UIDVALIDITY means stored UIDs may now name different messages.
+    // Seeing it for the first time (legacy or new accounts) is not a change.
+    let uid_validity_changed =
+        stored_uid_validity.is_some() && fetched_uid_validity != stored_uid_validity;
+    if uid_validity_changed {
         watermark_uid = None;
         last_open = None;
         sqlx::query(
@@ -124,6 +128,21 @@ pub async fn list_emails(
         )
         .bind(fetched_uid_validity)
         .bind(now_ms)
+        .bind(&account.id)
+        .execute(&state.db)
+        .await?;
+    } else if fetched_uid_validity != stored_uid_validity {
+        sqlx::query("UPDATE accounts SET uid_validity = ? WHERE id = ?")
+            .bind(fetched_uid_validity)
+            .bind(&account.id)
+            .execute(&state.db)
+            .await?;
+        // Bookmarks saved before UIDVALIDITY was tracked belong to this mailbox.
+        sqlx::query(
+            "UPDATE remembered SET uid_validity = ?
+             WHERE account_id = ? AND uid_validity IS NULL",
+        )
+        .bind(fetched_uid_validity)
         .bind(&account.id)
         .execute(&state.db)
         .await?;
@@ -137,7 +156,7 @@ pub async fn list_emails(
 
     // Only set last_open on first visit (when it was NULL).
     // Subsequent updates happen via the watermark save endpoint.
-    if last_open.is_none() && fetched_uid_validity == stored_uid_validity {
+    if last_open.is_none() && !uid_validity_changed {
         sqlx::query("UPDATE accounts SET last_open = ? WHERE id = ?")
             .bind(now_ms)
             .bind(&account.id)

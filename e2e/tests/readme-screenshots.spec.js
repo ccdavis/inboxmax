@@ -1,13 +1,16 @@
 /**
- * Takes screenshots for the README.
+ * Regenerates the README screenshots in docs/. Skipped in normal test runs so
+ * the committed images only change on purpose.
  *
  * Usage:
- *   cd e2e && npx playwright test take-screenshots.js
+ *   cd e2e && npm run screenshots
  *
  * The inbox screenshot uses mocked API responses so it works
  * without real IMAP credentials — just a running server.
  */
 import { test } from '@playwright/test';
+
+test.skip(!process.env.UPDATE_README_SCREENSHOTS, 'Set UPDATE_README_SCREENSHOTS=1 (npm run screenshots) to update docs/*.png');
 
 // ---------------------------------------------------------------------------
 // Mock data for the inbox screenshot
@@ -70,6 +73,9 @@ test('inbox screenshot with seen and unseen emails', async ({ page }) => {
   // Mock all API calls so we get a realistic inbox without real IMAP
   await page.route('**/api/auth/status', (route) =>
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(STATUS_RESPONSE) })
+  );
+  await page.route('**/api/emails?*', (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(EMAILS_RESPONSE) })
   );
   await page.route('**/api/emails', (route) =>
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(EMAILS_RESPONSE) })

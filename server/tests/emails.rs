@@ -3,10 +3,11 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{NaiveDate, Utc};
 use http_body_util::BodyExt;
-use inboxmax_server::error::AppResult;
+use inboxmax_server::error::{AppError, AppResult};
 use inboxmax_server::imap_client::{
     EmailEnvelope, FullEmail, MailCredentials, MailFetcher, MailboxSnapshot,
 };
+use inboxmax_server::rate_limit::AttemptLimiter;
 use inboxmax_server::session::{SessionAccount, SessionStore};
 use inboxmax_server::{AppState, api_router};
 use serde_json::Value;
@@ -17,6 +18,9 @@ use tower::ServiceExt;
 // ---------------------------------------------------------------------------
 // Mock IMAP
 // ---------------------------------------------------------------------------
+
+/// UID the mock mailbox reports as deleted.
+const MISSING_UID: u32 = 404;
 
 struct MockMailFetcher {
     envelopes: Vec<EmailEnvelope>,
@@ -42,6 +46,9 @@ impl MailFetcher for MockMailFetcher {
     }
 
     async fn fetch_email(&self, _credentials: &MailCredentials, uid: u32) -> AppResult<FullEmail> {
+        if uid == MISSING_UID {
+            return Err(AppError::NotFound("Message not found".into()));
+        }
         Ok(FullEmail {
             uid,
             subject: "Test".into(),
@@ -132,6 +139,7 @@ async fn build_state(envelopes: Vec<EmailEnvelope>) -> AppState {
         db: pool,
         sessions,
         mail: Arc::new(MockMailFetcher::with_envelopes(envelopes)),
+        limiter: AttemptLimiter::new(),
     }
 }
 
@@ -465,4 +473,51 @@ async fn list_emails_without_session_returns_unauthorized() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests: mailbox identity and message lookup
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn first_uid_validity_observation_keeps_legacy_state_and_bookmarks() {
+    let state = build_state(sample_envelopes()).await;
+    // A pre-UIDVALIDITY account with a watermark and a legacy bookmark.
+    sqlx::query("UPDATE accounts SET watermark_uid = 100, last_open = ? WHERE id = ?")
+        .bind(Utc::now().timestamp_millis() - 60_000)
+        .bind(ACCOUNT_ID)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO remembered (account_id, email_uid, subject) VALUES (?, 7, 'Old')")
+        .bind(ACCOUNT_ID)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let response = build_app(state.clone())
+        .oneshot(emails_request("/api/emails"))
+        .await
+        .unwrap();
+    let json = parse_response(response).await;
+    assert_eq!(json["watermark_uid"], 100);
+    assert_eq!(get_uid_validity(&state.db).await, Some(1));
+
+    let response = build_app(state.clone())
+        .oneshot(emails_request("/api/remembered"))
+        .await
+        .unwrap();
+    let remembered = parse_response(response).await;
+    assert_eq!(remembered.as_array().unwrap().len(), 1);
+    assert_eq!(remembered[0]["email_uid"], 7);
+}
+
+#[tokio::test]
+async fn missing_message_returns_not_found() {
+    let state = build_state(sample_envelopes()).await;
+    let response = build_app(state)
+        .oneshot(emails_request(&format!("/api/emails/{MISSING_UID}")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }

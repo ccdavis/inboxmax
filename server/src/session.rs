@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -11,7 +10,7 @@ const DEFAULT_MAX_SESSIONS: usize = 10_000;
 const DEVICE_TOKEN_LIFETIME_SECONDS: i64 = 30 * 24 * 60 * 60;
 
 /// App-level user (from registration / device cookie).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct UserSession {
     pub user_id: String,
     pub email: String,

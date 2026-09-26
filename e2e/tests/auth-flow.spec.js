@@ -4,7 +4,7 @@ test.describe('Full auth flow', () => {
   const email = `flow-${Date.now()}@example.com`;
   const password = 'password123';
 
-  test('register → logged-in landing → inbox → connect page → sign out → sign in', async ({ page }) => {
+  test('register → connect page → logged-in landing → sign out → sign in', async ({ page }) => {
     // 1. Start at landing page (anonymous)
     await page.goto('/');
     await expect(page.getByText('Maximum simplicity.', { exact: true })).toBeVisible();
@@ -20,37 +20,33 @@ test.describe('Full auth flow', () => {
     await page.locator('input[type="password"]').nth(1).fill(password);
     await page.locator('button[type="submit"]').click();
 
-    // 4. Should be on logged-in landing
-    await expect(page).toHaveURL('/');
-    await expect(page.locator('text=Welcome back')).toBeVisible({ timeout: 5000 });
-    await page.screenshot({ path: 'screenshots/landing-logged-in.png', fullPage: true });
+    // 4. A new account goes straight to connecting a mailbox
+    await expect(page).toHaveURL('/inbox');
+    await expect(page.getByRole('heading', { name: 'Connect your email' })).toBeVisible({ timeout: 5000 });
 
-    // 5. Click "Take me to Inbox Max" → /inbox
-    await page.locator('button', { hasText: 'Take me to Inbox Max' }).click();
+    // 5. The logged-in landing page links back to the inbox
+    await page.goto('/');
+    await expect(page.locator('text=Welcome back')).toBeVisible({ timeout: 5000 });
+    await page.getByRole('link', { name: 'Take me to Inbox Max' }).click();
     await expect(page).toHaveURL('/inbox');
 
-    // 6. Should see IMAP connect form (no IMAP account yet)
-    await expect(page.locator('text=Connect your email')).toBeVisible({ timeout: 5000 });
-    await page.screenshot({ path: 'screenshots/connect-account.png', fullPage: true });
+    // 6. Sign out from the connect screen
+    await page.getByRole('button', { name: 'Sign out' }).click();
+    await expect(page).toHaveURL('/signin');
 
-    // 7. Sign out
+    // 7. Anonymous landing page, also after a reload
     await page.goto('/');
-    await page.locator('button', { hasText: 'Sign out' }).click();
-
-    // 8. Should see anonymous landing page
     await expect(page.getByText('Maximum simplicity.', { exact: true })).toBeVisible({ timeout: 5000 });
     await page.reload();
     await expect(page.getByText('Maximum simplicity.', { exact: true })).toBeVisible({ timeout: 5000 });
 
-    // 9. Sign in again
+    // 8. Sign in again and land in the inbox
     await page.locator('nav a', { hasText: 'Sign In' }).click();
-    await page.locator('input[type="email"]').fill(email);
-    await page.locator('input[type="password"]').fill(password);
+    await page.getByLabel('Email').fill(email);
+    await page.getByLabel('Password').fill(password);
     await page.locator('button[type="submit"]').click();
-
-    // 10. Back to logged-in landing
-    await expect(page).toHaveURL('/');
-    await expect(page.locator('text=Welcome back')).toBeVisible({ timeout: 5000 });
+    await expect(page).toHaveURL('/inbox');
+    await expect(page.getByRole('heading', { name: 'Connect your email' })).toBeVisible({ timeout: 5000 });
   });
 
   test('/inbox redirects to /signin when not logged in', async ({ page }) => {
@@ -68,7 +64,7 @@ test.describe('Full auth flow', () => {
     await page.locator('input[type="password"]').first().fill(password);
     await page.locator('input[type="password"]').nth(1).fill(password);
     await page.locator('button[type="submit"]').click();
-    await expect(page).toHaveURL('/');
+    await expect(page).toHaveURL('/inbox');
 
     // Go directly to /inbox
     await page.goto('/inbox');

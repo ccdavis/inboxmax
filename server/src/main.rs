@@ -1,4 +1,5 @@
 use inboxmax_server::imap_client::RealMailFetcher;
+use inboxmax_server::rate_limit::AttemptLimiter;
 use inboxmax_server::session::SessionStore;
 use inboxmax_server::{AppState, api_router, db};
 use std::sync::Arc;
@@ -33,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
         db: pool,
         sessions: SessionStore::new(),
         mail: Arc::new(RealMailFetcher),
+        limiter: AttemptLimiter::new(),
     };
 
     let api = api_router(state);

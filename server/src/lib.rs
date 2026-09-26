@@ -3,9 +3,11 @@ pub mod db;
 pub mod error;
 pub mod handlers;
 pub mod imap_client;
+pub mod rate_limit;
 pub mod session;
 
 use imap_client::MailFetcher;
+use rate_limit::AttemptLimiter;
 use session::SessionStore;
 use sqlx::SqlitePool;
 use std::sync::Arc;
@@ -15,6 +17,7 @@ pub struct AppState {
     pub db: SqlitePool,
     pub sessions: SessionStore,
     pub mail: Arc<dyn MailFetcher>,
+    pub limiter: AttemptLimiter,
 }
 
 /// Build the complete API router so production and tests exercise the same routes.

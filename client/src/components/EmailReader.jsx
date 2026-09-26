@@ -1,16 +1,21 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import DOMPurify from 'dompurify';
 import * as api from '../api';
+import Spinner from './Spinner';
 import { formatFullDate } from '../utils/dates';
 
 function sanitizeEmailHtml(html) {
+  // No img, style or class attributes: remote images and CSS backgrounds are
+  // the common tracking channels, and dropping inline styles lets the email
+  // follow the app's light/dark theme.
   const clean = DOMPurify.sanitize(html, {
     ALLOWED_TAGS: [
-      'p', 'br', 'b', 'i', 'u', 'strong', 'em', 'a', 'div', 'span',
-      'table', 'tr', 'td', 'th', 'thead', 'tbody', 'h1', 'h2', 'h3', 'h4',
-      'ul', 'ol', 'li', 'blockquote', 'pre', 'code', 'hr',
+      'p', 'br', 'b', 'i', 'u', 's', 'strong', 'em', 'small', 'sub', 'sup', 'a', 'div', 'span',
+      'table', 'caption', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th',
+      'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+      'ul', 'ol', 'li', 'dl', 'dt', 'dd', 'blockquote', 'pre', 'code', 'hr',
     ],
-    ALLOWED_ATTR: ['href', 'target', 'rel', 'width', 'height', 'colspan', 'rowspan'],
+    ALLOWED_ATTR: ['href', 'colspan', 'rowspan'],
   });
   const template = document.createElement('template');
   template.innerHTML = clean;
@@ -21,8 +26,21 @@ function sanitizeEmailHtml(html) {
   return template.innerHTML;
 }
 
+function BackButton({ onBack, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onBack}
+      className="text-sm text-accent hover:text-accent-hover flex items-center gap-1 py-1 rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+    >
+      <span aria-hidden="true">&larr;</span> {children}
+    </button>
+  );
+}
+
 export default function EmailReader({ emailUid, onBack }) {
   const [request, setRequest] = useState({ uid: null, email: null, error: null });
+  const headingRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -39,10 +57,16 @@ export default function EmailReader({ emailUid, onBack }) {
     };
   }, [emailUid]);
 
+  const loaded = request.uid === emailUid && request.email;
+  // Announce the newly opened message to screen readers and keyboard users.
+  useEffect(() => {
+    if (loaded) headingRef.current?.focus();
+  }, [loaded]);
+
   if (request.uid !== emailUid) {
     return (
       <div className="flex items-center justify-center h-full">
-        <div className="w-6 h-6 border-2 border-slate-300 border-t-slate-600 rounded-full animate-spin" />
+        <Spinner label="Loading email" />
       </div>
     );
   }
@@ -50,53 +74,59 @@ export default function EmailReader({ emailUid, onBack }) {
   if (request.error) {
     return (
       <div className="p-4">
-        <button onClick={onBack} className="text-sm text-blue-600 hover:text-blue-700 mb-4 py-1 flex items-center gap-1">
-          <span>&larr;</span> Back
-        </button>
-        <div className="bg-red-50 text-red-700 text-sm px-4 py-3 rounded-lg border border-red-100">
+        <div className="mb-4">
+          <BackButton onBack={onBack}>Back</BackButton>
+        </div>
+        <div role="alert" className="bg-danger-bg text-danger-ink text-sm px-4 py-3 rounded-lg border border-danger-line">
           {request.error}
         </div>
       </div>
     );
   }
 
-  if (!request.email) return null;
-
   const email = request.email;
-
   const bodyHtml = email.body_html ? sanitizeEmailHtml(email.body_html) : null;
+  const imagesBlocked = Boolean(email.body_html && /<img\b/i.test(email.body_html));
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="px-4 py-3 border-b border-slate-200 bg-white shrink-0">
-        <button
-          onClick={onBack}
-          className="text-sm text-blue-600 hover:text-blue-700 flex items-center gap-1 mb-3 py-1"
-        >
-          <span>&larr;</span> Back to inbox
-        </button>
-        <h1 className="text-lg font-semibold text-slate-900">{email.subject}</h1>
-        <div className="mt-2 flex items-baseline gap-2 text-sm">
-          <span className="font-medium text-slate-700">{email.from}</span>
-          <span className="text-slate-400">to {email.to}</span>
+    <article className="flex flex-col h-full">
+      <header className="px-4 py-3 border-b border-line bg-canvas shrink-0">
+        <div className="mb-3">
+          <BackButton onBack={onBack}>Back to inbox</BackButton>
         </div>
-        <div className="text-xs text-slate-400 mt-1">
+        <h1
+          ref={headingRef}
+          tabIndex={-1}
+          className={`text-lg font-semibold break-words focus:outline-none ${email.subject ? 'text-ink' : 'text-ink-muted'}`}
+        >
+          {email.subject || '(no subject)'}
+        </h1>
+        <div className="mt-2 flex flex-wrap items-baseline gap-x-2 text-sm">
+          <span className="font-medium text-ink-soft">{email.from || 'Unknown sender'}</span>
+          {email.to && <span className="text-ink-muted break-all">to {email.to}</span>}
+        </div>
+        <div className="text-xs text-ink-muted mt-1">
           {formatFullDate(email.date)}
         </div>
-      </div>
+      </header>
 
-      <div className="flex-1 overflow-y-auto bg-white p-4">
+      <div className="flex-1 overflow-y-auto bg-canvas p-4">
+        {imagesBlocked && (
+          <p className="mb-3 text-xs text-ink-muted bg-hover rounded px-3 py-2">
+            Images in this email are blocked to protect your privacy.
+          </p>
+        )}
         {bodyHtml ? (
           <div
-            className="prose prose-sm prose-slate max-w-none"
+            className="prose prose-sm prose-slate dark:prose-invert max-w-none break-words prose-a:text-accent"
             dangerouslySetInnerHTML={{ __html: bodyHtml }}
           />
         ) : (
-          <pre className="whitespace-pre-wrap text-sm text-slate-700 font-sans">
+          <pre className="whitespace-pre-wrap break-words text-sm text-ink-soft font-sans">
             {email.body_text || '(empty message)'}
           </pre>
         )}
       </div>
-    </div>
+    </article>
   );
 }
