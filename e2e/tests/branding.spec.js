@@ -39,7 +39,7 @@ test.describe('Branding', () => {
     await page.locator('input[type="password"]').first().fill('password123');
     await page.locator('input[type="password"]').nth(1).fill('password123');
     await page.locator('button[type="submit"]').click();
-    await expect(page).toHaveURL('/');
+    await expect(page).toHaveURL('/inbox');
 
     await page.goto('/inbox');
     await expect(page.locator('text=Μ').first()).toBeVisible();

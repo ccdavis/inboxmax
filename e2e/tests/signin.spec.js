@@ -44,19 +44,18 @@ test.describe('Sign In', () => {
     await page.locator('input[type="password"]').fill('wrongpassword');
     await page.locator('button[type="submit"]').click();
 
-    await expect(page.locator('text=Not authenticated')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('alert')).toHaveText('Invalid email or password', { timeout: 5000 });
   });
 
-  test('successfully signs in and redirects to landing (logged in)', async ({ page }) => {
+  test('successfully signs in and goes to the inbox', async ({ page }) => {
     await page.goto('/signin');
 
     await page.locator('input[type="email"]').fill(email);
     await page.locator('input[type="password"]').fill(password);
     await page.locator('button[type="submit"]').click();
 
-    await expect(page).toHaveURL('/');
-    await expect(page.locator('text=Welcome back')).toBeVisible({ timeout: 5000 });
-    await expect(page.locator('text=Take me to Inbox Max')).toBeVisible();
+    await expect(page).toHaveURL('/inbox');
+    await expect(page.getByRole('heading', { name: 'Connect your email' })).toBeVisible({ timeout: 5000 });
   });
 
   test('redirects to /inbox after sign-in when that was the intended destination', async ({ page }) => {

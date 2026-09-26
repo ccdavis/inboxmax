@@ -2,6 +2,10 @@
 
 An email client for people who scan subject lines. Shows emails since you last opened the app, with a "remember this" bookmark feature.
 
+Emails whose sender and subject you have already scanned sit below a "last seen" marker and are greyed out;
+new ones stay highlighted. The marker advances when you leave the page, or you can place it yourself
+(click ▾ on a row, or use the ↑/↓ keys in the list). The interface follows your system's light or dark mode.
+
 Works with IMAP providers that support password or app-password authentication
 (Gmail, Outlook, Yahoo, and others).
 
@@ -60,7 +64,13 @@ cd client && npm test
 # End-to-end tests (Playwright starts the server; build the client first)
 cd client && npm run build
 cd e2e && npx playwright test
+
+# Regenerate the README screenshots in docs/
+cd e2e && npm run screenshots
 ```
+
+The end-to-end suite starts its own server on port 3101 with a throwaway database
+(`server/target/e2e/inboxmax.db`), so it never touches your development data.
 
 ## Configuration
 
@@ -72,4 +82,11 @@ cd e2e && npx playwright test
 | `COOKIE_SECURE` | `false` | Set to `true` when serving through HTTPS |
 
 For safety, custom IMAP hosts must resolve to public IP addresses. Private,
-loopback, link-local, and special-use network ranges are rejected.
+loopback, link-local, and special-use network ranges are rejected, including
+IPv6 forms (NAT64, 6to4, Teredo) that tunnel to them.
+
+Failed sign-ins are limited to 10 per account, and rejected mailbox logins to 10
+per user, in any 15-minute window.
+
+Mailbox passwords are held only in server memory, so after a server restart each
+user re-enters their mail password on the connect screen.

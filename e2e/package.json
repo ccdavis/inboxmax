@@ -5,7 +5,8 @@
   "scripts": {
     "test": "npx playwright test",
     "test:headed": "npx playwright test --headed",
-    "report": "npx playwright show-report"
+    "report": "npx playwright show-report",
+    "screenshots": "UPDATE_README_SCREENSHOTS=1 npx playwright test readme-screenshots"
   },
   "devDependencies": {
     "@playwright/test": "^1.52.0"

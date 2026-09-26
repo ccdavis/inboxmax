@@ -83,3 +83,60 @@ ordered so that security and data-integrity changes land before UI cleanup.
 - `npm run build`: passed and generated the PWA bundle.
 - Playwright behavior suite: 35 tests passed.
 - `npm audit` in both `client` and `e2e`: zero known vulnerabilities.
+
+# Follow-up review (2026-09-26)
+
+Bugs, UI glitches, and design issues found in a second review, all addressed.
+
+## Correctness
+
+- [x] Day grouping no longer drops emails in non-English locales or from later in
+      the day exactly a week ago (groups are keyed by calendar-day offset).
+- [x] Decode RFC 2047 encoded-words in subjects and sender names.
+- [x] Leaving the page advances the last-seen marker to the highest UID, only
+      forwards, and never overrides a marker the user placed by hand.
+- [x] Expire the in-memory email-window cursor before the server's seven-day limit.
+- [x] Keep search loading/errors separate from the inbox's; show a search-specific
+      empty state.
+- [x] Missing messages return 404; the requested UID is matched in FETCH replies.
+- [x] Non-ASCII searches declare `CHARSET UTF-8`.
+- [x] Password length counts characters on both client and server.
+- [x] First UIDVALIDITY observation keeps legacy watermarks; pre-tracking bookmarks
+      are backfilled (migration 005 plus first refresh).
+- [x] A lost mail session returns the user to the connect screen with a notice.
+
+## Security
+
+- [x] Rate-limit failed sign-ins per account and rejected mailbox logins per user;
+      equalize sign-in timing for unknown accounts.
+- [x] Block NAT64, 6to4, and Teredo IPv6 targets that reach private IPv4.
+
+## UI and accessibility
+
+- [x] Install the Tailwind typography plugin so HTML email formatting and links render.
+- [x] Mobile drawer fits the screen, only closes on navigation, supports Escape,
+      manages focus, and makes hidden content inert.
+- [x] Light and dark themes via semantic color tokens; seen rows are subtly greyed
+      in both.
+- [x] Labelled form fields with autocomplete, keyboard-operable rows, labelled icon
+      buttons, visible focus, AA-contrast secondary text, 36px touch targets.
+- [x] Reader: "(no subject)" fallback, themed back link, blocked-image notice,
+      focus on open; selected email highlighted in the sidebar.
+- [x] Single sidebar border; router link on the 404 page; dismissible notices.
+
+## Design
+
+- [x] Main pane shows every unseen email plus the rest of today, so unseen mail
+      does not disappear at midnight.
+- [x] Registration and sign-in go straight to the inbox (connect step for new users).
+- [x] Connect screen offers sign-out, an IMAP port override, and explains that the
+      mail password is held only in memory.
+- [x] The sidebar always browses the inbox (not search results) and omits empty days.
+- [x] Clean, user-facing error messages without status-code prefixes.
+
+## Tooling
+
+- [x] E2E runs on its own port and throwaway database; README screenshots only
+      regenerate via `npm run screenshots`.
+- [x] Removed dead code (unused `since` argument, `sinceTimestamp`, angle-bracket
+      stripping, unused derives and dependencies) and fixed a misplaced doc comment.

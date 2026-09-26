@@ -54,7 +54,7 @@ test.describe('Registration', () => {
     await expect(page.locator('text=Password must be at least 8 characters')).toBeVisible();
   });
 
-  test('successfully registers and redirects to landing (logged in)', async ({ page }) => {
+  test('successfully registers and continues to connect a mailbox', async ({ page }) => {
     await page.goto('/register');
 
     await page.locator('input[type="text"]').fill('Test User');
@@ -63,10 +63,8 @@ test.describe('Registration', () => {
     await page.locator('input[type="password"]').nth(1).fill('password123');
     await page.locator('button[type="submit"]').click();
 
-    // Should redirect to landing page with logged-in view
-    await expect(page).toHaveURL('/');
-    await expect(page.locator('text=Welcome back')).toBeVisible({ timeout: 5000 });
-    await expect(page.locator('text=Take me to Inbox Max')).toBeVisible();
+    await expect(page).toHaveURL('/inbox');
+    await expect(page.getByRole('heading', { name: 'Connect your email' })).toBeVisible({ timeout: 5000 });
   });
 
   test('shows error for duplicate email', async ({ page, request }) => {
@@ -93,16 +91,16 @@ test.describe('Registration', () => {
     await page.screenshot({ path: 'screenshots/register.png', fullPage: true });
   });
 
-  test('redirects to / if already logged in', async ({ page }) => {
+  test('redirects to the inbox if already logged in', async ({ page }) => {
     const authEmail = `redir-${Date.now()}@example.com`;
     await page.goto('/register');
     await page.locator('input[type="email"]').fill(authEmail);
     await page.locator('input[type="password"]').first().fill('password123');
     await page.locator('input[type="password"]').nth(1).fill('password123');
     await page.locator('button[type="submit"]').click();
-    await expect(page).toHaveURL('/');
+    await expect(page).toHaveURL('/inbox');
 
     await page.goto('/register');
-    await expect(page).toHaveURL('/');
+    await expect(page).toHaveURL('/inbox');
   });
 });
