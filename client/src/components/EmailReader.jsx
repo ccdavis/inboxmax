@@ -3,6 +3,7 @@ import DOMPurify from 'dompurify';
 import * as api from '../api';
 import Spinner from './Spinner';
 import { formatFullDate } from '../utils/dates';
+import { sameMailboxes } from '../utils/addresses';
 
 function sanitizeEmailHtml(html) {
   // No img, style or class attributes: remote images and CSS backgrounds are
@@ -24,6 +25,95 @@ function sanitizeEmailHtml(html) {
     link.setAttribute('rel', 'noopener noreferrer');
   }
   return template.innerHTML;
+}
+
+// Sender and server clocks disagree by seconds routinely; beyond this the
+// sent time is worth showing next to the received time.
+const CLOCK_SLACK_MS = 5 * 60 * 1000;
+
+function Address({ address }) {
+  return (
+    <span className="break-words">
+      {address.name ? (
+        <>
+          <span className="font-medium text-ink">{address.name}</span>{' '}
+          <span className="text-ink-muted break-all">&lt;{address.email}&gt;</span>
+        </>
+      ) : (
+        <span className="text-ink break-all">{address.email}</span>
+      )}
+    </span>
+  );
+}
+
+function HeaderRow({ label, children }) {
+  return (
+    <>
+      <dt className="text-ink-muted">{label}</dt>
+      <dd className="min-w-0 text-ink-soft">{children}</dd>
+    </>
+  );
+}
+
+function AddressList({ addresses }) {
+  if (!addresses?.length) return <span className="text-ink-muted">(none)</span>;
+  return (
+    <ul className="flex flex-col gap-0.5">
+      {addresses.map((address) => (
+        <li key={`${address.email}|${address.name ?? ''}`}>
+          <Address address={address} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * Who and when, spelled out: every address in full (people write from more
+ * than one), where replies really go, and when the message arrived as well
+ * as when the sender says they sent it.
+ */
+export function MessageHeaders({ email }) {
+  const replyToDiffers = email.reply_to?.length > 0 && !sameMailboxes(email.reply_to, email.from);
+  const sentDiffers = email.date && email.received
+    && Math.abs(new Date(email.received) - new Date(email.date)) > CLOCK_SLACK_MS;
+
+  return (
+    <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-sm">
+      <HeaderRow label="From">
+        {email.from?.length ? <AddressList addresses={email.from} /> : <span className="text-ink-muted">Unknown sender</span>}
+      </HeaderRow>
+      {email.reply_to?.length > 0 && (
+        <HeaderRow label="Reply-To">
+          <AddressList addresses={email.reply_to} />
+          {replyToDiffers && (
+            <p className="mt-0.5 text-xs font-medium text-star">
+              Replies go here, not to the sender.
+            </p>
+          )}
+        </HeaderRow>
+      )}
+      <HeaderRow label="To">
+        <AddressList addresses={email.to} />
+      </HeaderRow>
+      {email.cc?.length > 0 && (
+        <HeaderRow label="Cc">
+          <AddressList addresses={email.cc} />
+        </HeaderRow>
+      )}
+      {email.received ? (
+        <HeaderRow label="Received">
+          <time dateTime={email.received}>{formatFullDate(email.received)}</time>
+        </HeaderRow>
+      ) : null}
+      {(sentDiffers || !email.received) && email.date && (
+        <HeaderRow label="Sent">
+          <time dateTime={email.date}>{formatFullDate(email.date)}</time>
+          {sentDiffers && <span className="text-ink-muted"> (by the sender&rsquo;s clock)</span>}
+        </HeaderRow>
+      )}
+    </dl>
+  );
 }
 
 function BackButton({ onBack, children }) {
@@ -111,13 +201,7 @@ export default function EmailReader({ accountId, emailUid, onBack }) {
         >
           {email.subject || '(no subject)'}
         </h1>
-        <div className="mt-2 flex flex-wrap items-baseline gap-x-2 text-sm">
-          <span className="font-medium text-ink-soft">{email.from || 'Unknown sender'}</span>
-          {email.to && <span className="text-ink-muted break-all">to {email.to}</span>}
-        </div>
-        <div className="text-xs text-ink-muted mt-1">
-          {formatFullDate(email.date)}
-        </div>
+        <MessageHeaders email={email} />
       </header>
 
       <div className="flex-1 overflow-y-auto bg-canvas p-4">

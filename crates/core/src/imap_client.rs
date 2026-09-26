@@ -3,7 +3,7 @@ use async_imap::types::Fetch;
 use async_native_tls::TlsConnector;
 use chrono::{DateTime, NaiveDate, Utc};
 use futures::TryStreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
@@ -112,13 +112,40 @@ pub struct EmailEnvelope {
     pub date: Option<DateTime<Utc>>,
 }
 
+/// One mailbox from an address header: the display name, if any, and the
+/// address itself, kept apart so the address is never hidden behind a name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailAddress {
+    pub name: Option<String>,
+    pub email: String,
+}
+
+impl MailAddress {
+    pub fn new(name: Option<&str>, email: &str) -> Self {
+        Self {
+            name: name
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(Into::into),
+            email: email.trim().to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct FullEmail {
     pub uid: u32,
     pub subject: String,
-    pub from: String,
-    pub to: String,
+    pub from: Vec<MailAddress>,
+    /// Where replies should go, when the sender asked for somewhere other
+    /// than `from`.
+    pub reply_to: Vec<MailAddress>,
+    pub to: Vec<MailAddress>,
+    pub cc: Vec<MailAddress>,
+    /// When the sender says it was sent (the Date header, set by the sender).
     pub date: Option<DateTime<Utc>>,
+    /// When the mail server received it (IMAP INTERNALDATE).
+    pub received: Option<DateTime<Utc>>,
     pub body_html: Option<String>,
     pub body_text: Option<String>,
     pub message_id: Option<String>,
@@ -226,7 +253,7 @@ pub async fn fetch_email_by_uid(session: &mut ImapSession, uid: u32) -> AppResul
     // app's own "seen" marker is independent and tracks headers the user has
     // scanned in the list.
     let messages = session
-        .uid_fetch(uid.to_string(), "(UID ENVELOPE BODY[])")
+        .uid_fetch(uid.to_string(), "(UID INTERNALDATE BODY[])")
         .await
         .map_err(|e| AppError::Imap(format!("FETCH failed: {e}")))?;
 
@@ -241,25 +268,51 @@ pub async fn fetch_email_by_uid(session: &mut ImapSession, uid: u32) -> AppResul
         .find(|msg| msg.uid == Some(uid))
         .ok_or_else(|| AppError::NotFound("Message not found".into()))?;
 
-    let body_raw = msg.body().unwrap_or_default();
+    let received = msg.internal_date().map(|d| d.with_timezone(&Utc));
+    parse_message(uid, msg.body().unwrap_or_default(), received)
+}
+
+/// Build a [`FullEmail`] from a raw RFC 5322 message. Headers come from the
+/// message itself (with RFC 2047 names decoded); `received` is the server's
+/// delivery time, which the message cannot state for itself.
+pub fn parse_message(
+    uid: u32,
+    raw: &[u8],
+    received: Option<DateTime<Utc>>,
+) -> AppResult<FullEmail> {
     let parsed = mail_parser::MessageParser::default()
-        .parse(body_raw)
+        .parse(raw)
         .ok_or_else(|| AppError::Imap("Failed to parse message".into()))?;
-
-    let envelope = msg
-        .envelope()
-        .ok_or_else(|| AppError::Imap("No envelope".into()))?;
-
     Ok(FullEmail {
         uid,
-        subject: decode_header_text(envelope.subject.as_ref()),
-        from: format_addresses(envelope.from.as_ref()),
-        to: format_addresses(envelope.to.as_ref()),
-        date: parse_imap_date(envelope.date.as_ref()),
+        subject: parsed.subject().unwrap_or_default().trim().to_string(),
+        from: mail_addresses(parsed.from()),
+        reply_to: mail_addresses(parsed.reply_to()),
+        to: mail_addresses(parsed.to()),
+        cc: mail_addresses(parsed.cc()),
+        date: parsed
+            .date()
+            .and_then(|d| DateTime::from_timestamp(d.to_timestamp(), 0)),
+        received,
         body_html: parsed.body_html(0).map(|s| s.to_string()),
         body_text: parsed.body_text(0).map(|s| s.to_string()),
         message_id: parsed.message_id().map(|s| s.to_string()),
     })
+}
+
+/// Every mailbox in an address header, groups flattened. Entries without an
+/// address (such as `undisclosed-recipients:;`) are dropped.
+fn mail_addresses(header: Option<&mail_parser::Address<'_>>) -> Vec<MailAddress> {
+    let Some(header) = header else {
+        return Vec::new();
+    };
+    header
+        .iter()
+        .filter_map(|addr| {
+            let email = addr.address().map(str::trim).filter(|a| !a.is_empty())?;
+            Some(MailAddress::new(addr.name(), email))
+        })
+        .collect()
 }
 
 /// Search emails using IMAP SEARCH.
@@ -483,7 +536,11 @@ fn parse_imap_date(date: Option<&std::borrow::Cow<'_, [u8]>>) -> Option<DateTime
 
 #[cfg(test)]
 mod tests {
-    use super::{build_search_query, decode_header_text, is_public_ip, newest_uid_strings};
+    use super::{
+        MailAddress, build_search_query, decode_header_text, is_public_ip, newest_uid_strings,
+        parse_message,
+    };
+    use chrono::{TimeZone, Utc};
     use std::borrow::Cow;
     use std::net::IpAddr;
 
@@ -555,5 +612,65 @@ mod tests {
     #[test]
     fn search_uid_limit_prefers_newest_messages() {
         assert_eq!(newest_uid_strings([3, 100, 2, 50], 3), ["100", "50", "3"]);
+    }
+
+    fn addr(name: Option<&str>, email: &str) -> MailAddress {
+        MailAddress::new(name, email)
+    }
+
+    #[test]
+    fn parses_names_with_addresses_reply_to_cc_and_both_times() {
+        let raw = concat!(
+            "From: =?UTF-8?Q?Sarah_Ch=C3=A9n?= <sarah@work.example>\r\n",
+            "Reply-To: Help Desk <help@work.example>\r\n",
+            "To: me@example.com, \"Bob, Jr.\" <bob@example.com>\r\n",
+            "Cc: Team: ann@example.com, Cy <cy@example.com>;\r\n",
+            "Subject: Quarterly numbers\r\n",
+            "Date: Fri, 25 Sep 2026 09:00:00 -0400\r\n",
+            "Message-ID: <abc@work.example>\r\n",
+            "\r\n",
+            "Hello\r\n",
+        );
+        let received = Utc.with_ymd_and_hms(2026, 9, 25, 16, 30, 0).unwrap();
+        let email = parse_message(7, raw.as_bytes(), Some(received)).unwrap();
+
+        assert_eq!(email.from, [addr(Some("Sarah Chén"), "sarah@work.example")]);
+        assert_eq!(
+            email.reply_to,
+            [addr(Some("Help Desk"), "help@work.example")]
+        );
+        assert_eq!(
+            email.to,
+            [
+                addr(None, "me@example.com"),
+                addr(Some("Bob, Jr."), "bob@example.com")
+            ]
+        );
+        // Group syntax is flattened into its members.
+        assert_eq!(
+            email.cc,
+            [
+                addr(None, "ann@example.com"),
+                addr(Some("Cy"), "cy@example.com")
+            ]
+        );
+        assert_eq!(
+            email.date,
+            Some(Utc.with_ymd_and_hms(2026, 9, 25, 13, 0, 0).unwrap())
+        );
+        assert_eq!(email.received, Some(received));
+        assert_eq!(email.subject, "Quarterly numbers");
+        assert_eq!(email.message_id.as_deref(), Some("abc@work.example"));
+        assert_eq!(email.body_text.as_deref().map(str::trim), Some("Hello"));
+    }
+
+    #[test]
+    fn missing_headers_and_undisclosed_recipients_are_empty() {
+        let raw = "From: <solo@example.com>\r\nTo: undisclosed-recipients:;\r\n\r\nBody\r\n";
+        let email = parse_message(1, raw.as_bytes(), None).unwrap();
+        assert_eq!(email.from, [addr(None, "solo@example.com")]);
+        assert!(email.to.is_empty() && email.cc.is_empty() && email.reply_to.is_empty());
+        assert_eq!((email.date, email.received), (None, None));
+        assert_eq!(email.subject, "");
     }
 }

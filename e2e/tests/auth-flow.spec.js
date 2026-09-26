@@ -42,8 +42,10 @@ test.describe('Full auth flow', () => {
 
     // 8. Sign in again and land in the inbox
     await page.locator('nav a', { hasText: 'Sign In' }).click();
-    await page.getByLabel('Email').fill(email);
-    await page.getByLabel('Password').fill(password);
+    // Ask for the textboxes: while the route swaps, a loose "Email" label
+    // match can land on landing-page sections that mention email.
+    await page.getByRole('textbox', { name: 'Email' }).fill(email);
+    await page.getByRole('textbox', { name: 'Password' }).fill(password);
     await page.locator('button[type="submit"]').click();
     await expect(page).toHaveURL('/inbox');
     await expect(page.getByRole('heading', { name: 'Connect your email' })).toBeVisible({ timeout: 5000 });

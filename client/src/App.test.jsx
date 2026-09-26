@@ -225,9 +225,12 @@ describe('desktop app', () => {
     api.getEmail.mockResolvedValue({
       uid: 30,
       subject: 'Thirty',
-      from: 'B',
-      to: 'work@example.com',
+      from: [{ name: 'B', email: 'b@example.com' }],
+      reply_to: [],
+      to: [{ name: null, email: 'work@example.com' }],
+      cc: [],
       date: now,
+      received: now,
       body_html: '<p>See <a href="https://example.com/">the site</a></p>',
       body_text: null,
     });

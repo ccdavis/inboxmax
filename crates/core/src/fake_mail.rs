@@ -4,9 +4,11 @@
 //! feature also serve it to every account when `INBOXMAX_FAKE_MAIL=1`.
 
 use crate::error::{AppError, AppResult};
-use crate::imap_client::{EmailEnvelope, FullEmail, MailCredentials, MailFetcher, MailboxSnapshot};
+use crate::imap_client::{
+    EmailEnvelope, FullEmail, MailAddress, MailCredentials, MailFetcher, MailboxSnapshot,
+};
 use crate::mailbox::{self, RememberRequest};
-use chrono::{Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use sqlx::SqlitePool;
 use std::sync::Arc;
 
@@ -34,27 +36,124 @@ const DEMO_UNSEEN: usize = 4;
 /// ...and these (by position, newest first) are remembered.
 const DEMO_REMEMBERED: [usize; 2] = [7, 8];
 
-const MESSAGES: &[(&str, &str)] = &[
-    ("GitHub", "PR #47 merged: fix dashboard layout"),
-    ("Amazon Web Services", "Your AWS billing summary"),
-    ("Sarah Chen", "Quick question about the API spec"),
-    ("Notion", "Team standup notes"),
-    ("Google Calendar", "Invitation: Design review @ Wed 2pm"),
-    ("Amazon", "Your order has shipped!"),
-    ("Stripe", "Invoice #1042 from Acme Corp"),
-    ("Delta Air Lines", "Flight confirmation - SFO to JFK"),
-    ("Property Management", "Apartment lease renewal"),
-    ("Café Olé", "Menü der Woche — Grüße aus der Küche"),
-    ("Ada Lovelace", "Notes on the analytical engine"),
-    ("Newsletter", "This week in Rust"),
+type Mailbox = (&'static str, &'static str);
+
+/// One generated message. The mix covers what the reader has to show: a
+/// Reply-To that differs from the sender, Cc, and a delivery delayed hours
+/// after the sender's Date.
+struct FakeMessage {
+    from: Mailbox,
+    subject: &'static str,
+    reply_to: Option<Mailbox>,
+    cc: &'static [Mailbox],
+    /// Minutes between the sender's Date header and the server receiving it.
+    delivery_delay_minutes: i64,
+}
+
+const fn message(from: Mailbox, subject: &'static str) -> FakeMessage {
+    FakeMessage {
+        from,
+        subject,
+        reply_to: None,
+        cc: &[],
+        delivery_delay_minutes: 0,
+    }
+}
+
+const MESSAGES: &[FakeMessage] = &[
+    FakeMessage {
+        reply_to: Some(("ccdavis/inboxmax", "reply+a1b2c3@reply.github.com")),
+        ..message(
+            ("GitHub", "notifications@github.com"),
+            "PR #47 merged: fix dashboard layout",
+        )
+    },
+    message(
+        ("Amazon Web Services", "no-reply-aws@amazon.com"),
+        "Your AWS billing summary",
+    ),
+    FakeMessage {
+        cc: &[("Bob Park", "bob.park@acme.example")],
+        ..message(
+            ("Sarah Chen", "sarah.chen@acme.example"),
+            "Quick question about the API spec",
+        )
+    },
+    message(("Notion", "notify@mail.notion.so"), "Team standup notes"),
+    FakeMessage {
+        reply_to: Some(("Sarah Chen", "sarah.chen@acme.example")),
+        ..message(
+            ("Google Calendar", "calendar-notification@google.com"),
+            "Invitation: Design review @ Wed 2pm",
+        )
+    },
+    message(
+        ("Amazon", "shipment-tracking@amazon.com"),
+        "Your order has shipped!",
+    ),
+    FakeMessage {
+        reply_to: Some(("Acme Corp Billing", "billing@acme.example")),
+        ..message(
+            ("Stripe", "invoices@stripe.com"),
+            "Invoice #1042 from Acme Corp",
+        )
+    },
+    FakeMessage {
+        delivery_delay_minutes: 180,
+        ..message(
+            ("Delta Air Lines", "deltaairlines@t.delta.com"),
+            "Flight confirmation - SFO to JFK",
+        )
+    },
+    message(
+        ("Property Management", "leasing@parkview-apts.example"),
+        "Apartment lease renewal",
+    ),
+    message(
+        ("Café Olé", "hallo@cafe-ole.example"),
+        "Menü der Woche — Grüße aus der Küche",
+    ),
+    message(
+        ("Ada Lovelace", "ada@analytical.example"),
+        "Notes on the analytical engine",
+    ),
+    message(
+        ("Newsletter", "editor@this-week-in-rust.example"),
+        "This week in Rust",
+    ),
 ];
 
-/// Every generated mailbox: one message every five hours, newest first.
-/// Outside the demo account, the mailbox login's domain is added to the
-/// senders so accounts differ.
+/// Every generated mailbox: one message received every five hours, newest
+/// first. Outside the demo account, the mailbox login's domain is added to
+/// the sender names so accounts differ.
 pub struct FakeMailFetcher;
 
-fn envelopes(credentials: &MailCredentials) -> Vec<EmailEnvelope> {
+/// A generated message with its sender name for this mailbox, and when the
+/// server received it.
+struct Generated {
+    uid: u32,
+    message: &'static FakeMessage,
+    sender_name: String,
+    received: DateTime<Utc>,
+}
+
+impl Generated {
+    /// When the sender says it was sent.
+    fn sent(&self) -> DateTime<Utc> {
+        self.received - Duration::minutes(self.message.delivery_delay_minutes)
+    }
+
+    fn envelope(&self) -> EmailEnvelope {
+        EmailEnvelope {
+            uid: self.uid,
+            subject: self.message.subject.to_string(),
+            from: self.sender_name.clone(),
+            date: Some(self.sent()),
+        }
+    }
+}
+
+fn generate(credentials: &MailCredentials) -> Vec<Generated> {
     let now = Utc::now();
     let demo = is_demo_account(&credentials.email, &credentials.host);
     let domain = credentials
@@ -65,16 +164,30 @@ fn envelopes(credentials: &MailCredentials) -> Vec<EmailEnvelope> {
     MESSAGES
         .iter()
         .enumerate()
-        .map(|(i, (from, subject))| EmailEnvelope {
+        .map(|(i, message)| Generated {
             uid: 1000 - i as u32,
-            subject: (*subject).to_string(),
-            from: if demo {
-                (*from).to_string()
+            message,
+            sender_name: if demo {
+                message.from.0.to_string()
             } else {
-                format!("{from} ({domain})")
+                format!("{} ({domain})", message.from.0)
             },
-            date: Some(now - Duration::minutes(5 + i as i64 * 300)),
+            received: now - Duration::minutes(5 + i as i64 * 300),
         })
+        .collect()
+}
+
+fn envelopes(credentials: &MailCredentials) -> Vec<EmailEnvelope> {
+    generate(credentials)
+        .iter()
+        .map(Generated::envelope)
+        .collect()
+}
+
+fn addresses(mailboxes: &[Mailbox]) -> Vec<MailAddress> {
+    mailboxes
+        .iter()
+        .map(|(name, email)| MailAddress::new(Some(name), email))
         .collect()
 }
 
@@ -186,25 +299,32 @@ impl MailFetcher for FakeMailFetcher {
     }
 
     async fn fetch_email(&self, credentials: &MailCredentials, uid: u32) -> AppResult<FullEmail> {
-        let envelope = envelopes(credentials)
+        let generated = generate(credentials)
             .into_iter()
-            .find(|e| e.uid == uid)
+            .find(|g| g.uid == uid)
             .ok_or_else(|| AppError::NotFound("Message not found".into()))?;
+        let message = generated.message;
         Ok(FullEmail {
             uid,
+            subject: message.subject.to_string(),
+            from: vec![MailAddress::new(
+                Some(&generated.sender_name),
+                message.from.1,
+            )],
+            reply_to: addresses(message.reply_to.as_slice()),
+            to: vec![MailAddress::new(None, &credentials.email)],
+            cc: addresses(message.cc),
+            date: Some(generated.sent()),
+            received: Some(generated.received),
             body_html: Some(format!(
                 "<h2>{subject}</h2><p>This is a generated message from the demo mailbox.</p>\
-                 <ul><li>Sender: {from}</li><li>UID: {uid}</li></ul>\
+                 <ul><li>Sender: {name}</li><li>UID: {uid}</li></ul>\
                  <p>Read more at <a href=\"https://example.com/\">example.com</a>.</p>",
-                subject = envelope.subject,
-                from = envelope.from,
+                subject = message.subject,
+                name = generated.sender_name,
             )),
             body_text: None,
-            to: credentials.email.clone(),
-            message_id: None,
-            subject: envelope.subject,
-            from: envelope.from,
-            date: envelope.date,
+            message_id: Some(format!("{uid}.{UID_VALIDITY}@fake.inboxmax.invalid")),
         })
     }
 
@@ -266,6 +386,41 @@ mod tests {
         );
         assert!(fake.fetch_email(&creds, 1).await.is_err());
         assert_eq!(fake.search(&creds, "INVOICE").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn messages_carry_full_addresses_reply_to_cc_and_delivery_time() {
+        let fake = FakeMailFetcher;
+        let creds = credentials("pw");
+        let email = |subject: &'static str| {
+            let uid = 1000
+                - MESSAGES
+                    .iter()
+                    .position(|m| m.subject.contains(subject))
+                    .unwrap() as u32;
+            let fake = &fake;
+            let creds = &creds;
+            async move { fake.fetch_email(creds, uid).await.unwrap() }
+        };
+
+        let github = email("PR #47").await;
+        assert_eq!(github.from[0].email, "notifications@github.com");
+        assert_eq!(github.reply_to[0].email, "reply+a1b2c3@reply.github.com");
+        assert_eq!(github.to, [MailAddress::new(None, "me@example.com")]);
+        assert_eq!(github.date, github.received, "delivered at once");
+
+        let sarah = email("API spec").await;
+        assert_eq!(
+            sarah.cc,
+            [MailAddress::new(Some("Bob Park"), "bob.park@acme.example")]
+        );
+        assert!(sarah.reply_to.is_empty());
+
+        let delta = email("Flight").await;
+        assert_eq!(
+            delta.received.unwrap() - delta.date.unwrap(),
+            Duration::minutes(180)
+        );
     }
 
     /// Stands in for real IMAP: every call fails.

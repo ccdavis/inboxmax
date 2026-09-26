@@ -19,8 +19,8 @@ describe('EmailReader', () => {
     api.getEmail.mockResolvedValue({
       uid: 1,
       subject: 'Test Email',
-      from: 'sender@example.com',
-      to: 'me@example.com',
+      from: [{ name: null, email: 'sender@example.com' }],
+      to: [{ name: null, email: 'me@example.com' }],
       date: new Date().toISOString(),
       body_html: '<p>Click <a href="https://example.com">here</a> and <a href="https://other.com">there</a></p>',
       body_text: null,
@@ -45,8 +45,8 @@ describe('EmailReader', () => {
     api.getEmail.mockResolvedValue({
       uid: 2,
       subject: 'Plain Email',
-      from: 'sender@example.com',
-      to: 'me@example.com',
+      from: [{ name: null, email: 'sender@example.com' }],
+      to: [{ name: null, email: 'me@example.com' }],
       date: new Date().toISOString(),
       body_html: '<p>No links here</p>',
       body_text: null,
@@ -65,8 +65,8 @@ describe('EmailReader', () => {
     api.getEmail.mockResolvedValue({
       uid: 4,
       subject: 'Tracked Email',
-      from: 'sender@example.com',
-      to: 'me@example.com',
+      from: [{ name: null, email: 'sender@example.com' }],
+      to: [{ name: null, email: 'me@example.com' }],
       date: new Date().toISOString(),
       body_html: '<script>alert(1)</script><p style="background:url(https://tracker.test/pixel)">Safe</p><img src="https://tracker.test/pixel">',
       body_text: null,
@@ -84,8 +84,8 @@ describe('EmailReader', () => {
     api.getEmail.mockResolvedValue({
       uid: 3,
       subject: 'Plain Text',
-      from: 'sender@example.com',
-      to: 'me@example.com',
+      from: [{ name: null, email: 'sender@example.com' }],
+      to: [{ name: null, email: 'me@example.com' }],
       date: new Date().toISOString(),
       body_html: null,
       body_text: 'Just plain text content',
@@ -102,8 +102,8 @@ describe('EmailReader', () => {
     api.getEmail.mockResolvedValue({
       uid: 5,
       subject: '',
-      from: 'sender@example.com',
-      to: 'me@example.com',
+      from: [{ name: null, email: 'sender@example.com' }],
+      to: [{ name: null, email: 'me@example.com' }],
       date: null,
       body_html: '<p>Hi</p><img src="https://tracker.test/pixel">',
       body_text: null,
@@ -116,6 +116,82 @@ describe('EmailReader', () => {
     await waitFor(() => expect(heading).toHaveFocus());
     expect(screen.getByText(/Images in this email are blocked/)).toBeInTheDocument();
     expect(screen.getByText('Hi').closest('.prose')).not.toBeNull();
+  });
+
+  describe('headers', () => {
+    const SARAH = { name: 'Sarah Chen', email: 'sarah.chen@acme.example' };
+    const base = {
+      uid: 9,
+      subject: 'Headers',
+      from: [SARAH],
+      reply_to: [],
+      to: [{ name: null, email: 'me@example.com' }],
+      cc: [],
+      date: '2026-09-25T13:00:00Z',
+      received: '2026-09-25T13:00:30Z',
+      body_html: null,
+      body_text: 'Body',
+    };
+    const row = (label) => screen.getByText(label, { selector: 'dt' }).nextElementSibling;
+
+    async function renderHeaders(overrides) {
+      api.getEmail.mockResolvedValue({ ...base, ...overrides });
+      render(<EmailReader emailUid={9} onBack={() => {}} />);
+      await screen.findByRole('heading', { name: 'Headers' });
+    }
+
+    it('shows each sender and recipient as name and address', async () => {
+      await renderHeaders({
+        cc: [{ name: 'Bob Park', email: 'bob.park@acme.example' }, { name: null, email: 'cy@example.com' }],
+      });
+      expect(row('From')).toHaveTextContent('Sarah Chen <sarah.chen@acme.example>');
+      expect(row('To')).toHaveTextContent('me@example.com');
+      expect(row('Cc')).toHaveTextContent('Bob Park <bob.park@acme.example>');
+      expect(row('Cc')).toHaveTextContent('cy@example.com');
+    });
+
+    it('leaves out Reply-To and Cc when the message has none', async () => {
+      await renderHeaders();
+      expect(screen.queryByText('Reply-To', { selector: 'dt' })).toBeNull();
+      expect(screen.queryByText('Cc', { selector: 'dt' })).toBeNull();
+    });
+
+    it('warns when replies go somewhere other than the sender', async () => {
+      await renderHeaders({ reply_to: [{ name: 'Billing', email: 'billing@acme.example' }] });
+      expect(row('Reply-To')).toHaveTextContent('Billing <billing@acme.example>');
+      expect(row('Reply-To')).toHaveTextContent('Replies go here, not to the sender.');
+    });
+
+    it('shows a Reply-To that matches the sender without a warning', async () => {
+      await renderHeaders({ reply_to: [{ name: null, email: 'SARAH.CHEN@acme.example' }] });
+      expect(row('Reply-To')).toHaveTextContent('SARAH.CHEN@acme.example');
+      expect(row('Reply-To')).not.toHaveTextContent('Replies go here');
+    });
+
+    it('shows when the message was received, and the sent time only when it differs', async () => {
+      await renderHeaders();
+      expect(row('Received').querySelector('time')).toHaveAttribute('dateTime', base.received);
+      expect(screen.queryByText('Sent', { selector: 'dt' })).toBeNull();
+    });
+
+    it('shows both times for a delayed delivery', async () => {
+      await renderHeaders({ date: '2026-09-25T10:00:00Z' });
+      expect(row('Received').querySelector('time')).toHaveAttribute('dateTime', base.received);
+      expect(row('Sent').querySelector('time')).toHaveAttribute('dateTime', '2026-09-25T10:00:00Z');
+      expect(row('Sent')).toHaveTextContent('by the sender’s clock');
+    });
+
+    it('falls back to the sent time when the server gave no received time', async () => {
+      await renderHeaders({ received: null });
+      expect(screen.queryByText('Received', { selector: 'dt' })).toBeNull();
+      expect(row('Sent').querySelector('time')).toHaveAttribute('dateTime', base.date);
+      expect(row('Sent')).not.toHaveTextContent('sender’s clock');
+    });
+
+    it('says so when there is no sender', async () => {
+      await renderHeaders({ from: [] });
+      expect(row('From')).toHaveTextContent('Unknown sender');
+    });
   });
 
   it('shows load errors with a way back', async () => {

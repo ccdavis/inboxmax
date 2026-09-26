@@ -6,7 +6,7 @@ use http_body_util::BodyExt;
 use inboxmax_core::ConnectedAccount;
 use inboxmax_server::error::{AppError, AppResult};
 use inboxmax_server::imap_client::{
-    EmailEnvelope, FullEmail, MailCredentials, MailFetcher, MailboxSnapshot,
+    EmailEnvelope, FullEmail, MailAddress, MailCredentials, MailFetcher, MailboxSnapshot,
 };
 use inboxmax_server::rate_limit::AttemptLimiter;
 use inboxmax_server::session::SessionStore;
@@ -53,9 +53,12 @@ impl MailFetcher for MockMailFetcher {
         Ok(FullEmail {
             uid,
             subject: "Test".into(),
-            from: "test@example.com".into(),
-            to: "me@example.com".into(),
+            from: vec![MailAddress::new(Some("Tess"), "test@example.com")],
+            reply_to: vec![],
+            to: vec![MailAddress::new(None, "me@example.com")],
+            cc: vec![],
             date: Some(Utc::now()),
+            received: Some(Utc::now()),
             body_html: None,
             body_text: Some("body".into()),
             message_id: None,

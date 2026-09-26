@@ -36,9 +36,12 @@ async function mockApi(page, { searchResults = [] } = {}) {
       return json({
         uid: 300,
         subject: 'Formatted',
-        from: 'Sender 0',
-        to: 'me@example.com',
+        from: [{ name: 'Sender 0', email: 'sender0@example.com' }],
+        reply_to: [],
+        to: [{ name: null, email: 'me@example.com' }],
+        cc: [],
         date: ago(HOUR),
+        received: ago(HOUR),
         body_html: '<h1>Heading</h1><p>Read the <a href="https://example.com">docs</a>.</p><ul><li>One</li></ul>',
         body_text: null,
       });

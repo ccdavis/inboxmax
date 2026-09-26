@@ -3,21 +3,7 @@
  * (INBOXMAX_FAKE_MAIL=1): register, connect mailboxes, read, switch.
  */
 import { test, expect } from '@playwright/test';
-
-async function register(page) {
-  await page.goto('/register');
-  await page.getByLabel('Email').fill(`mailboxes-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`);
-  await page.getByLabel('Password', { exact: true }).fill('password123');
-  await page.getByLabel('Confirm Password').fill('password123');
-  await page.getByRole('button', { name: 'Create Account' }).click();
-  await expect(page.getByRole('heading', { name: 'Connect your email' })).toBeVisible();
-}
-
-async function connect(page, email, password = 'mail-password') {
-  await page.getByLabel('Email').fill(email);
-  await page.getByLabel(/^Password/).fill(password);
-  await page.getByRole('button', { name: 'Connect Email Account' }).click();
-}
+import { connect, register } from './helpers.js';
 
 test('connect two mailboxes, read a message, and switch between them', async ({ page }) => {
   await register(page);
