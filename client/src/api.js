@@ -1,103 +1,34 @@
-const BASE = '';
+// The app's single entry point to the backend. The transport is chosen at
+// build time: HTTP for the web app, Tauri IPC for the desktop app (see the
+// `#transport` alias in vite.config.js). Both return the same data shapes.
+import { transport } from '#transport';
 
-/** A failed API call. `message` is the server's human-readable error. */
-export class ApiError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.name = 'ApiError';
-    this.status = status;
-  }
-}
+export { ApiError } from './apiError';
 
-async function request(path, options = {}) {
-  const headers = { ...options.headers };
-  if (options.body && !headers['Content-Type']) {
-    headers['Content-Type'] = 'application/json';
-  }
-  const res = await fetch(`${BASE}${path}`, {
-    credentials: 'include',
-    ...options,
-    headers,
-  });
-  if (!res.ok) {
-    let message;
-    const text = await res.text().catch(() => '');
-    try {
-      const json = JSON.parse(text);
-      message = json.error;
-    } catch {
-      message = text || res.statusText;
-    }
-    throw new ApiError(res.status, message || 'Request failed');
-  }
-  return res.json();
-}
+export const isDesktop = transport.isDesktop;
 
-// App auth
-export function register(email, password, displayName) {
-  return request('/api/register', {
-    method: 'POST',
-    body: JSON.stringify({ email, password, display_name: displayName || undefined }),
-  });
-}
+// Signed-in state. Desktop is always signed in and adds `app` details.
+export const getSession = () => transport.getSession();
 
-export function signin(email, password) {
-  return request('/api/signin', {
-    method: 'POST',
-    body: JSON.stringify({ email, password }),
-  });
-}
+// Web-only user accounts.
+export const register = (email, password, displayName) => transport.register(email, password, displayName);
+export const signin = (email, password) => transport.signin(email, password);
+export const signout = () => transport.signout();
 
-export function signout() {
-  return request('/api/signout', { method: 'POST' });
-}
+// Mailboxes.
+export const listAccounts = () => transport.listAccounts();
+/** `details`: { email, password, imap_host?, imap_port?, remember? } */
+export const connectAccount = (details) => transport.connectAccount(details);
+export const removeAccount = (accountId) => transport.removeAccount(accountId);
 
-// IMAP connect
-export function connect(email, password, overrides = {}) {
-  return request('/api/connect', {
-    method: 'POST',
-    body: JSON.stringify({ email, password, ...overrides }),
-  });
-}
+// Inbox operations on one mailbox.
+export const getEmails = (accountId, since) => transport.getEmails(accountId, since);
+export const getEmail = (accountId, uid) => transport.getEmail(accountId, uid);
+export const searchEmails = (accountId, query) => transport.searchEmails(accountId, query);
+export const setWatermark = (accountId, uid) => transport.setWatermark(accountId, uid);
+export const getRemembered = (accountId) => transport.getRemembered(accountId);
+export const rememberEmail = (accountId, uid, data) => transport.rememberEmail(accountId, uid, data);
+export const forgetEmail = (accountId, uid) => transport.forgetEmail(accountId, uid);
 
-// Auth status (both app + IMAP)
-export function getStatus() {
-  return request('/api/auth/status');
-}
-
-// Emails
-export function getEmails(since) {
-  const params = since ? `?since=${encodeURIComponent(since)}` : '';
-  return request(`/api/emails${params}`);
-}
-
-export function getEmail(uid) {
-  return request(`/api/emails/${uid}`);
-}
-
-export function setWatermark(uid) {
-  return request('/api/watermark', {
-    method: 'PUT',
-    body: JSON.stringify({ uid }),
-  });
-}
-
-export function searchEmails(query) {
-  return request(`/api/search?q=${encodeURIComponent(query)}`);
-}
-
-// Remembered
-export function getRemembered() {
-  return request('/api/remembered');
-}
-
-export function rememberEmail(uid, data) {
-  return request(`/api/remembered/${uid}`, {
-    method: 'POST',
-    body: JSON.stringify(data),
-  });
-}
-
-export function forgetEmail(uid) {
-  return request(`/api/remembered/${uid}`, { method: 'DELETE' });
-}
+/** Open a link from an email outside the app. */
+export const openExternal = (url) => transport.openExternal(url);

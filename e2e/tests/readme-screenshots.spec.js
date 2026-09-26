@@ -42,9 +42,12 @@ const STATUS_RESPONSE = {
   logged_in: true,
   email: 'demo@inboxmax.app',
   user: { user_id: 'demo-user', email: 'demo@inboxmax.app', display_name: 'Demo User' },
-  imap_connected: true,
-  imap_email: 'demo@inboxmax.app',
 };
+
+const ACCOUNTS_RESPONSE = [
+  { id: 'work', email: 'demo@inboxmax.app', connected: true, password_saved: false },
+  { id: 'home', email: 'demo.home@example.com', connected: true, password_saved: false },
+];
 
 const EMAILS_RESPONSE = {
   emails: MOCK_EMAILS,
@@ -74,19 +77,13 @@ test('inbox screenshot with seen and unseen emails', async ({ page }) => {
   await page.route('**/api/auth/status', (route) =>
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(STATUS_RESPONSE) })
   );
-  await page.route('**/api/emails?*', (route) =>
-    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(EMAILS_RESPONSE) })
-  );
-  await page.route('**/api/emails', (route) =>
-    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(EMAILS_RESPONSE) })
-  );
-  await page.route('**/api/remembered', (route) =>
-    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(MOCK_REMEMBERED) })
-  );
+  const json = (body) => (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+  await page.route('**/api/accounts', json(ACCOUNTS_RESPONSE));
+  await page.route('**/api/accounts/work/emails*', json(EMAILS_RESPONSE));
+  await page.route('**/api/accounts/work/remembered', json(MOCK_REMEMBERED));
   // Catch watermark PUTs so they don't 401
-  await page.route('**/api/watermark', (route) =>
-    route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
-  );
+  await page.route('**/api/accounts/work/watermark', json({ ok: true }));
 
   await page.goto('/inbox');
 

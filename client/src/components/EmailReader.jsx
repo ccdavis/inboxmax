@@ -38,14 +38,14 @@ function BackButton({ onBack, children }) {
   );
 }
 
-export default function EmailReader({ emailUid, onBack }) {
+export default function EmailReader({ accountId, emailUid, onBack }) {
   const [request, setRequest] = useState({ uid: null, email: null, error: null });
   const headingRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
     api
-      .getEmail(emailUid)
+      .getEmail(accountId, emailUid)
       .then((data) => {
         if (!cancelled) setRequest({ uid: emailUid, email: data, error: null });
       })
@@ -55,7 +55,7 @@ export default function EmailReader({ emailUid, onBack }) {
     return () => {
       cancelled = true;
     };
-  }, [emailUid]);
+  }, [accountId, emailUid]);
 
   const loaded = request.uid === emailUid && request.email;
   // Announce the newly opened message to screen readers and keyboard users.
@@ -85,6 +85,16 @@ export default function EmailReader({ emailUid, onBack }) {
   }
 
   const email = request.email;
+
+  // The desktop WebView cannot follow target="_blank" links, so hand them to
+  // the system browser. (Enter on a focused link also fires click.)
+  const handleBodyClick = (e) => {
+    const link = e.target.closest?.('a[href]');
+    if (!link || !api.isDesktop) return;
+    e.preventDefault();
+    api.openExternal(link.href).catch(() => {});
+  };
+
   const bodyHtml = email.body_html ? sanitizeEmailHtml(email.body_html) : null;
   const imagesBlocked = Boolean(email.body_html && /<img\b/i.test(email.body_html));
 
@@ -119,6 +129,7 @@ export default function EmailReader({ emailUid, onBack }) {
         {bodyHtml ? (
           <div
             className="prose prose-sm prose-slate dark:prose-invert max-w-none break-words prose-a:text-accent"
+            onClick={handleBodyClick}
             dangerouslySetInnerHTML={{ __html: bodyHtml }}
           />
         ) : (

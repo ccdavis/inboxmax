@@ -12,6 +12,7 @@ export default function DayGroup({ label, emails, selectedUid, onSelectEmail }) 
         expanded={expanded}
         onToggle={() => setExpanded(!expanded)}
         controls={listId}
+        units={['email', 'emails']}
         count={emails.length}
         className="text-ink-muted hover:bg-hover"
       >

@@ -10,7 +10,7 @@ vi.mock('../api', () => ({
 
 import * as api from '../api';
 
-const ACCOUNT = 'test@example.com';
+const ACCOUNT = 'account-1';
 const SINCE_KEY = `inboxmax_since:${ACCOUNT}`;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -72,7 +72,7 @@ describe('useEmails', () => {
 
     await fetchEmails(result);
 
-    expect(api.getEmails).toHaveBeenCalledWith(storedSince);
+    expect(api.getEmails).toHaveBeenCalledWith(ACCOUNT, storedSince);
   });
 
   it('rejects stale and future stored cursors', async () => {
@@ -81,7 +81,7 @@ describe('useEmails', () => {
       api.getEmails.mockResolvedValueOnce(makeEmailResponse());
       const { result, unmount } = renderHook(() => useEmails(ACCOUNT));
       await fetchEmails(result);
-      expect(api.getEmails).toHaveBeenLastCalledWith(undefined);
+      expect(api.getEmails).toHaveBeenLastCalledWith(ACCOUNT, undefined);
       unmount();
     }
   });
@@ -95,7 +95,7 @@ describe('useEmails', () => {
     api.getEmails.mockClear();
     await fetchEmails(result);
 
-    expect(api.getEmails).toHaveBeenCalledWith(since);
+    expect(api.getEmails).toHaveBeenCalledWith(ACCOUNT, since);
   });
 
   it('drops the in-memory cursor once it is too old for the server', async () => {
@@ -110,7 +110,7 @@ describe('useEmails', () => {
     api.getEmails.mockClear();
     await fetchEmails(result);
 
-    expect(api.getEmails).toHaveBeenCalledWith(undefined);
+    expect(api.getEmails).toHaveBeenCalledWith(ACCOUNT, undefined);
   });
 
   it('updates inbox and watermark state from the API', async () => {
@@ -176,6 +176,30 @@ describe('useEmails', () => {
     expect(result.current.watermarkUid).toBe(11);
   });
 
+  it('clears one mailbox\'s emails and marker when switching to another', async () => {
+    api.getEmails.mockResolvedValueOnce(makeEmailResponse({ watermark_uid: 90 }));
+    const { result, rerender } = renderHook(({ account }) => useEmails(account), {
+      initialProps: { account: ACCOUNT },
+    });
+    await fetchEmails(result);
+    expect(result.current.emails).toHaveLength(2);
+
+    let resolveOther;
+    api.getEmails.mockReturnValueOnce(new Promise((resolve) => { resolveOther = resolve; }));
+    rerender({ account: 'account-2' });
+    let pending;
+    act(() => {
+      pending = result.current.fetchEmails();
+    });
+    expect(result.current.emails).toEqual([]);
+    expect(result.current.watermarkUid).toBeNull();
+    expect(api.getEmails).toHaveBeenLastCalledWith('account-2', undefined);
+
+    resolveOther(makeEmailResponse({ emails: [], watermark_uid: 5 }));
+    await act(async () => pending);
+    expect(result.current.watermarkUid).toBe(5);
+  });
+
   describe('markAllSeen', () => {
     it('moves the marker to the highest UID, not the newest date', async () => {
       api.getEmails.mockResolvedValue(makeEmailResponse({ watermark_uid: 90 }));
@@ -184,7 +208,7 @@ describe('useEmails', () => {
 
       await act(async () => result.current.markAllSeen());
 
-      expect(api.setWatermark).toHaveBeenCalledWith(100);
+      expect(api.setWatermark).toHaveBeenCalledWith(ACCOUNT, 100);
       expect(result.current.watermarkUid).toBe(100);
     });
 

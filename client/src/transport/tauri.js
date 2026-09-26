@@ -1,0 +1,43 @@
+// Desktop transport: Tauri IPC commands in the Inbox Max desktop app.
+// Commands mirror the HTTP API and return the same JSON shapes.
+import { invoke } from '@tauri-apps/api/core';
+import { ApiError } from '../apiError';
+
+async function call(command, args) {
+  try {
+    return await invoke(command, args);
+  } catch (caught) {
+    // Commands reject with the serialized AppError: { status, message }.
+    if (caught && typeof caught === 'object' && 'message' in caught) {
+      throw new ApiError(caught.status ?? 500, caught.message);
+    }
+    throw new ApiError(500, String(caught));
+  }
+}
+
+const unsupported = () => Promise.reject(new ApiError(400, 'Not available in the desktop app'));
+
+export const transport = {
+  isDesktop: true,
+
+  // One local profile: always "signed in", no user accounts.
+  getSession: async () => ({ logged_in: true, user: null, app: await call('app_info') }),
+  register: unsupported,
+  signin: unsupported,
+  signout: unsupported,
+
+  listAccounts: () => call('list_accounts'),
+  connectAccount: (request) => call('connect_account', { request }),
+  removeAccount: (accountId) => call('remove_account', { accountId }),
+
+  getEmails: (accountId, since) => call('list_emails', { accountId, since: since ?? null }),
+  getEmail: (accountId, uid) => call('get_email', { accountId, uid }),
+  searchEmails: (accountId, query) => call('search_emails', { accountId, query }),
+  setWatermark: (accountId, uid) => call('set_watermark', { accountId, uid }),
+
+  getRemembered: (accountId) => call('list_remembered', { accountId }),
+  rememberEmail: (accountId, uid, data) => call('remember_email', { accountId, uid, data }),
+  forgetEmail: (accountId, uid) => call('forget_email', { accountId, uid }),
+
+  openExternal: (url) => call('open_external', { url }),
+};

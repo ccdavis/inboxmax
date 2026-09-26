@@ -1,5 +1,9 @@
-/** Collapsible section header used by the sidebar groups. */
-export default function DisclosureHeader({ expanded, onToggle, controls, count, className = '', children }) {
+/**
+ * Collapsible section header used by the sidebar groups. `units` names what
+ * is counted, as [singular, plural], so screen readers hear "Today, 5 emails"
+ * rather than a bare number.
+ */
+export default function DisclosureHeader({ expanded, onToggle, controls, count, units, className = '', children }) {
   return (
     <button
       type="button"
@@ -10,7 +14,11 @@ export default function DisclosureHeader({ expanded, onToggle, controls, count, 
     >
       {children}
       <span className="flex items-center gap-1.5">
-        <span className="font-normal normal-case text-xs text-ink-muted">{count}</span>
+        <span className="font-normal normal-case text-xs text-ink-muted">
+          <span className="sr-only">, </span>
+          {count}
+          {units && <span className="sr-only"> {count === 1 ? units[0] : units[1]}</span>}
+        </span>
         <svg
           className={`w-3 h-3 text-ink-muted transition-transform ${expanded ? 'rotate-90' : ''}`}
           fill="none"
