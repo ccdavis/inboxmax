@@ -21,6 +21,7 @@ function renderList(props = {}) {
     onSelectEmail: vi.fn(),
     onToggleRemember: vi.fn(),
     onSetWatermark: vi.fn(),
+    onMarkAllSeen: vi.fn(),
     onToggleHideSeen: vi.fn(),
     onRefresh: vi.fn(),
   };
@@ -83,9 +84,20 @@ describe('EmailList', () => {
       { uid: 7, subject: 'Seen today', from: 'Cy', date: hoursAgo(0) },
     ];
     renderList({ emails, watermarkUid: 8 });
-    const items = [...screen.getByRole('list').children];
     const divider = screen.getByRole('separator', { name: /Already seen/ });
-    expect(items.indexOf(divider)).toBe(items.indexOf(rowFor('Seen today')) - 1);
+    const follows = (a, b) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(follows(rowFor('New today'), divider)).toBe(true);
+    expect(follows(divider, rowFor('Seen today'))).toBe(true);
+    // Each list holds only emails; the divider sits between them.
+    for (const list of screen.getAllByRole('list')) {
+      expect([...list.children].every((child) => child.matches('li[data-uid]'))).toBe(true);
+    }
+  });
+
+  it('greys out seen emails in search results too', () => {
+    renderList({ searchQuery: 'e' });
+    expect(rowFor('Newest').className).toContain('bg-canvas');
+    expect(rowFor('Seen long ago').className).toContain('bg-seen');
   });
 
   it('shows everything as new when there is no marker yet', () => {
@@ -96,9 +108,10 @@ describe('EmailList', () => {
   });
 
   it('marks everything seen from the header', () => {
-    const { onSetWatermark } = renderList();
+    const { onMarkAllSeen, onSetWatermark } = renderList();
     fireEvent.click(screen.getByRole('button', { name: 'Mark all seen' }));
-    expect(onSetWatermark).toHaveBeenCalledWith(6);
+    expect(onMarkAllSeen).toHaveBeenCalled();
+    expect(onSetWatermark).not.toHaveBeenCalled();
   });
 
   it('offers no mark-all-seen when nothing is new', () => {

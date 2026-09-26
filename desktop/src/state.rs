@@ -3,7 +3,7 @@
 
 use crate::credentials::CredentialStore;
 use inboxmax_core::account::{self, AccountRecord, AccountStatus};
-use inboxmax_core::fake_mail::{DEMO_PASSWORD, is_demo_host};
+use inboxmax_core::fake_mail::{DEMO_PASSWORD, is_demo_account};
 use inboxmax_core::imap_client::MailFetcher;
 use inboxmax_core::{AppError, AppResult, ConnectedAccount};
 use sqlx::SqlitePool;
@@ -101,7 +101,7 @@ impl DesktopState {
         let (demo, records): (Vec<_>, Vec<_>) = account::list_accounts(&self.db, LOCAL_USER_ID)
             .await?
             .into_iter()
-            .partition(|r| is_demo_host(&r.imap_host));
+            .partition(|r| is_demo_account(&r.email, &r.imap_host));
         // The demo mailbox needs no password, so it is always open.
         {
             let mut connected = self.connected.write().await;
@@ -167,7 +167,7 @@ impl DesktopState {
     pub async fn add_connected(&self, account: ConnectedAccount, remember: bool) -> bool {
         let saved = match self.saved.clone() {
             // The demo mailbox reopens on launch without a saved password.
-            _ if is_demo_host(&account.imap_host) => false,
+            _ if is_demo_account(&account.email, &account.imap_host) => false,
             Some(store) => {
                 let (email, password) = (account.email.clone(), account.password.clone());
                 let result = blocking(move || {

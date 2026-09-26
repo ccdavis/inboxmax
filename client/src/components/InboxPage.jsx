@@ -34,11 +34,11 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
   const accountId = active?.connected ? active.id : null;
   const {
     emails, loading, refreshing, error, lastOpen, watermarkUid,
-    fetchEmails, setWatermarkManually, markAllSeen,
+    fetchEmails, reload, setWatermarkManually, markAllSeen, markAllSeenNow,
     searchResults, searchLoading, searchError, search, clearSearch, clearStoredCursors,
   } = useEmails(accountId);
   const {
-    remembered, remember, forget, isRemembered,
+    remembered, remember, forget, isRemembered, fetchRemembered,
     error: rememberedError,
   } = useRemembered(accountId);
   const searchMode = searchQuery != null;
@@ -129,8 +129,12 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
     setAddingAccount(false);
     resetView();
     setNotice(null);
-    // Reopening the demo while it is showing starts it over, so reload it.
-    if (result.account.id === wasShowing) fetchEmails();
+    // Reopening the demo while it is showing starts it over (marker and
+    // remembered emails included), so reload both.
+    if (result.account.id === wasShowing) {
+      reload();
+      fetchRemembered();
+    }
   };
 
   const handleRemove = async (id) => {
@@ -255,6 +259,7 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
           searchQuery={searchQuery}
           watermarkUid={watermarkUid}
           onSetWatermark={setWatermarkManually}
+          onMarkAllSeen={markAllSeenNow}
           hideSeen={hideSeen}
           onToggleHideSeen={() => setHideSeen((h) => !h)}
           onRefresh={fetchEmails}

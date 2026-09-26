@@ -16,14 +16,15 @@ pub use error::{AppError, AppResult};
 
 use std::sync::Arc;
 
-/// The mail client the front ends should use: real IMAP, with the generated
-/// demo mailbox for the demo account. Builds with the `fake-mail` feature
-/// serve the demo mailbox to every account when `INBOXMAX_FAKE_MAIL=1`.
+/// The mail client the front ends should use: real IMAP, or in builds with
+/// the `fake-mail` feature, the generated demo mailbox when
+/// `INBOXMAX_FAKE_MAIL=1`. The desktop app adds its demo account on top with
+/// [`fake_mail::WithDemoMailbox`].
 pub fn default_mail_fetcher() -> Arc<dyn imap_client::MailFetcher> {
     #[cfg(feature = "fake-mail")]
     if std::env::var("INBOXMAX_FAKE_MAIL").is_ok_and(|v| v == "1") {
         tracing::warn!("Using the fake demo mailbox (INBOXMAX_FAKE_MAIL=1)");
         return Arc::new(fake_mail::FakeMailFetcher);
     }
-    Arc::new(fake_mail::WithDemoMailbox(imap_client::RealMailFetcher))
+    Arc::new(imap_client::RealMailFetcher)
 }

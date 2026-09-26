@@ -270,6 +270,22 @@ describe('desktop app', () => {
     expect(api.getEmails.mock.calls.map(([accountId]) => accountId)).toContain('demo');
   });
 
+  it('reloads the inbox and remembered emails when the open demo starts over', async () => {
+    const DEMO = { id: 'demo', email: 'demo@inboxmax.invalid', connected: true, password_saved: false };
+    api.listAccounts.mockResolvedValue([DEMO]);
+    api.connectDemo.mockResolvedValue({ account: DEMO, provider_detected: false });
+    render(<DesktopApp />);
+    await screen.findByText('Thirty');
+    const emailLoads = api.getEmails.mock.calls.length;
+    const rememberedLoads = api.getRemembered.mock.calls.length;
+
+    fireEvent.click(screen.getByRole('button', { name: '+ Add mailbox' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Try the demo mailbox' }));
+
+    await vi.waitFor(() => expect(api.getEmails.mock.calls.length).toBeGreaterThan(emailLoads));
+    expect(api.getRemembered.mock.calls.length).toBeGreaterThan(rememberedLoads);
+  });
+
   it('opens email links in the system browser', async () => {
     render(<DesktopApp />);
     fireEvent.click(await screen.findByText('Thirty'));

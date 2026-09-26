@@ -1,6 +1,6 @@
 //! An in-process mailbox with generated messages, for demos, development
-//! without an IMAP account, and end-to-end tests. Every build serves it to
-//! the demo account (see [`WithDemoMailbox`]); builds with the `fake-mail`
+//! without an IMAP account, and end-to-end tests. The desktop app serves it
+//! to its demo account (see [`WithDemoMailbox`]); builds with the `fake-mail`
 //! feature also serve it to every account when `INBOXMAX_FAKE_MAIL=1`.
 
 use crate::error::{AppError, AppResult};
@@ -8,6 +8,7 @@ use crate::imap_client::{EmailEnvelope, FullEmail, MailCredentials, MailFetcher,
 use crate::mailbox::{self, RememberRequest};
 use chrono::{Duration, NaiveDate, Utc};
 use sqlx::SqlitePool;
+use std::sync::Arc;
 
 /// The demo account, which people can open to try the app without a mail
 /// account. `.invalid` names are reserved (RFC 2606), so no real mailbox or
@@ -17,9 +18,10 @@ pub const DEMO_HOST: &str = "demo.inboxmax.invalid";
 /// The demo mailbox accepts any password; this is the one the app uses.
 pub const DEMO_PASSWORD: &str = "demo";
 
-/// Whether an account's IMAP host is the demo mailbox.
-pub fn is_demo_host(host: &str) -> bool {
-    host.eq_ignore_ascii_case(DEMO_HOST)
+/// Whether an account is the demo account: both its address and its IMAP
+/// host, so a real address with a mistyped host is never taken for it.
+pub fn is_demo_account(email: &str, host: &str) -> bool {
+    email.eq_ignore_ascii_case(DEMO_EMAIL) && host.eq_ignore_ascii_case(DEMO_HOST)
 }
 
 /// Any password is accepted except this one, which simulates a rejected login.
@@ -54,7 +56,7 @@ pub struct FakeMailFetcher;
 
 fn envelopes(credentials: &MailCredentials) -> Vec<EmailEnvelope> {
     let now = Utc::now();
-    let demo = is_demo_host(&credentials.host);
+    let demo = is_demo_account(&credentials.email, &credentials.host);
     let domain = credentials
         .email
         .rsplit('@')
@@ -121,22 +123,24 @@ pub async fn reset_demo(db: &SqlitePool, account_id: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Serves the demo mailbox to accounts on [`DEMO_HOST`] and passes every
-/// other account to the wrapped mail client.
-pub struct WithDemoMailbox<F>(pub F);
+/// Serves the demo mailbox to the demo account and passes every other
+/// account to the wrapped mail client. Only for the single-user desktop app:
+/// the demo accepts any password, so on the multi-user web server it would
+/// let anyone claim the demo address.
+pub struct WithDemoMailbox(pub Arc<dyn MailFetcher>);
 
-impl<F: MailFetcher> WithDemoMailbox<F> {
+impl WithDemoMailbox {
     fn pick(&self, credentials: &MailCredentials) -> &dyn MailFetcher {
-        if is_demo_host(&credentials.host) {
+        if is_demo_account(&credentials.email, &credentials.host) {
             &FakeMailFetcher
         } else {
-            &self.0
+            self.0.as_ref()
         }
     }
 }
 
 #[async_trait::async_trait]
-impl<F: MailFetcher> MailFetcher for WithDemoMailbox<F> {
+impl MailFetcher for WithDemoMailbox {
     async fn fetch_envelopes(
         &self,
         credentials: &MailCredentials,
@@ -289,7 +293,7 @@ mod tests {
 
     #[tokio::test]
     async fn only_the_demo_account_gets_the_demo_mailbox() {
-        let mail = WithDemoMailbox(Unreachable);
+        let mail = WithDemoMailbox(Arc::new(Unreachable));
         let demo = MailCredentials {
             host: DEMO_HOST.into(),
             port: 993,
@@ -302,6 +306,16 @@ mod tests {
         assert_eq!(snapshot.envelopes[0].from, "GitHub", "no domain suffix");
 
         assert!(mail.verify_credentials(&credentials("pw")).await.is_err());
+        // The demo host alone does not make a real address the demo.
+        let real_address_on_demo_host = MailCredentials {
+            email: "me@example.com".into(),
+            ..demo
+        };
+        assert!(
+            mail.verify_credentials(&real_address_on_demo_host)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

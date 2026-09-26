@@ -8,8 +8,10 @@ mod commands;
 mod credentials;
 mod state;
 
+use inboxmax_core::fake_mail::WithDemoMailbox;
 use state::DesktopState;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tauri::Manager;
 
 /// The database lives in the per-user app data directory unless
@@ -47,7 +49,9 @@ pub fn run() {
             let path = database_path(app)?;
             let state = tauri::async_runtime::block_on(async {
                 let db = inboxmax_core::db::init_pool_at(&path).await?;
-                let mail = inboxmax_core::default_mail_fetcher();
+                // The desktop's one local profile can safely offer the demo
+                // account; the multi-user web server does not.
+                let mail = Arc::new(WithDemoMailbox(inboxmax_core::default_mail_fetcher()));
                 DesktopState::new(db, mail, credentials::system_store())
                     .await
                     .map_err(anyhow::Error::from)

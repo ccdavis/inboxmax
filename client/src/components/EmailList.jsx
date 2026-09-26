@@ -1,4 +1,4 @@
-import { Fragment, useRef, useEffect } from 'react';
+import { useRef, useEffect } from 'react';
 import EmailRow from './EmailRow';
 import Spinner from './Spinner';
 import { isToday } from '../utils/dates';
@@ -23,13 +23,13 @@ function EmptyState({ title, children }) {
  */
 function SeenDivider() {
   return (
-    <li role="separator" aria-label="Already seen: emails below this line" className="flex items-center gap-2 px-3 py-1.5 bg-canvas">
+    <div role="separator" aria-label="Already seen: emails below this line" className="flex items-center gap-2 px-3 py-1.5 bg-canvas">
       <span className="h-0.5 flex-1 rounded-full bg-marker-line" aria-hidden="true" />
       <span className="shrink-0 rounded-full bg-marker px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-accent" aria-hidden="true">
         Already seen
       </span>
       <span className="h-0.5 flex-1 rounded-full bg-marker-line" aria-hidden="true" />
-    </li>
+    </div>
   );
 }
 
@@ -51,6 +51,7 @@ export default function EmailList({
   searchQuery,
   watermarkUid,
   onSetWatermark,
+  onMarkAllSeen,
   hideSeen,
   onToggleHideSeen,
   onRefresh,
@@ -68,7 +69,6 @@ export default function EmailList({
     ? baseEmails.filter((email) => email.uid >= watermarkUid)
     : baseEmails;
   const newCount = baseEmails.filter(isUnseen).length;
-  const newestUid = emails.reduce((max, email) => Math.max(max, email.uid), 0);
   // The highlighted marker row is the line between new and seen. When that
   // email is not in the list, a divider stands in for it: above the first
   // seen row, or after the list if every row is new.
@@ -88,6 +88,19 @@ export default function EmailList({
   } else {
     headerText = newCount === 0 ? 'No new emails' : `${newCount} new`;
   }
+
+  const renderRow = (email) => (
+    <EmailRow
+      key={email.uid}
+      email={email}
+      onClick={onSelectEmail}
+      isRemembered={isRemembered(email.uid)}
+      onToggleRemember={onToggleRemember}
+      isSeen={!isUnseen(email)}
+      isWatermark={email.uid === watermarkUid}
+      onSetWatermark={onSetWatermark}
+    />
+  );
 
   const listRef = useRef(null);
 
@@ -156,7 +169,7 @@ export default function EmailList({
           {!searchMode && newCount > 0 && (
             <button
               type="button"
-              onClick={() => onSetWatermark(newestUid)}
+              onClick={() => onMarkAllSeen()}
               className="text-xs px-2 py-1.5 rounded text-accent hover:text-accent-hover hover:bg-hover transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
             >
               Mark all seen
@@ -218,25 +231,16 @@ export default function EmailList({
 
         {emptyState}
 
-        {!loading && visibleEmails.length > 0 && (
-          <ul>
-            {visibleEmails.map((email, index) => (
-              <Fragment key={email.uid}>
-                {index === dividerIndex && <SeenDivider />}
-                <EmailRow
-                  email={email}
-                  onClick={onSelectEmail}
-                  isRemembered={isRemembered(email.uid)}
-                  onToggleRemember={onToggleRemember}
-                  isSeen={!searchMode && !isUnseen(email)}
-                  isWatermark={email.uid === watermarkUid}
-                  onSetWatermark={onSetWatermark}
-                />
-              </Fragment>
-            ))}
-            {dividerIndex === visibleEmails.length && <SeenDivider />}
-          </ul>
-        )}
+        {!loading && visibleEmails.length > 0 && (dividerIndex === -1 ? (
+          <ul>{visibleEmails.map(renderRow)}</ul>
+        ) : (
+          // The divider sits between two lists so each list holds only emails.
+          <>
+            {dividerIndex > 0 && <ul>{visibleEmails.slice(0, dividerIndex).map(renderRow)}</ul>}
+            <SeenDivider />
+            {dividerIndex < visibleEmails.length && <ul>{visibleEmails.slice(dividerIndex).map(renderRow)}</ul>}
+          </>
+        ))}
 
         {!loading && earlierSeenCount > 0 && visibleEmails.length > 0 && (
           <p className="px-4 py-3 text-center text-xs text-ink-muted border-t border-line-subtle">
