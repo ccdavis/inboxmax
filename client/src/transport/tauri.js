@@ -41,5 +41,10 @@ export const transport = {
   rememberEmail: (accountId, uid, data) => call('remember_email', { accountId, uid, data }),
   forgetEmail: (accountId, uid) => call('forget_email', { accountId, uid }),
 
+  searchContacts: (query) => call('list_contacts', { query }),
+  listContacts: () => call('list_contacts', { query: null }),
+  saveContact: (request) => call('save_contact', { request }),
+  deleteContact: (id) => call('delete_contact', { id }),
+
   openExternal: (url) => call('open_external', { url }),
 };

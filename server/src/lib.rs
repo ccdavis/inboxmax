@@ -24,7 +24,7 @@ pub struct AppState {
 /// Build the complete API router so production and tests exercise the same routes.
 pub fn api_router(state: AppState) -> axum::Router {
     use axum::routing::{get, post, put};
-    use handlers::{accounts, auth, emails, remembered};
+    use handlers::{accounts, auth, contacts, emails, remembered};
 
     let router = axum::Router::new()
         .route("/api/register", post(auth::register))
@@ -35,6 +35,14 @@ pub fn api_router(state: AppState) -> axum::Router {
         .route(
             "/api/accounts",
             get(accounts::list_accounts).post(accounts::connect),
+        )
+        .route(
+            "/api/contacts",
+            get(contacts::list_contacts).post(contacts::save_contact),
+        )
+        .route(
+            "/api/contacts/{id}",
+            axum::routing::delete(contacts::delete_contact),
         )
         .route(
             "/api/accounts/{account_id}",

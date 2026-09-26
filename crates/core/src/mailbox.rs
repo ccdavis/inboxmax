@@ -3,6 +3,7 @@
 //! The web and desktop front ends expose these unchanged.
 
 use crate::account::ConnectedAccount;
+use crate::contacts;
 use crate::error::{AppError, AppResult};
 use crate::imap_client::{EmailEnvelope, FullEmail, MailAddress, MailFetcher};
 use crate::outgoing::{OutgoingEmail, SendReceipt, SendRequest};
@@ -163,13 +164,22 @@ pub async fn list_emails(
     })
 }
 
+/// Open a message. Its sender (and Reply-To) join `user_id`'s address book.
 pub async fn get_email(
+    db: &SqlitePool,
     mail: &dyn MailFetcher,
+    user_id: &str,
     account: &ConnectedAccount,
     uid: i64,
 ) -> AppResult<FullEmail> {
     let uid = validate_uid(uid)?;
-    mail.fetch_email(&account.mail_credentials(), uid).await
+    let email = mail.fetch_email(&account.mail_credentials(), uid).await?;
+    let people: Vec<_> = email.from.iter().chain(&email.reply_to).cloned().collect();
+    // The address book is a convenience; reading must not fail because of it.
+    if let Err(e) = contacts::record_seen(db, user_id, &people, &[&account.email]).await {
+        tracing::warn!("Could not update the address book: {e}");
+    }
+    Ok(email)
 }
 
 /// Record `uid` as the last-seen email and the visit time.
@@ -184,15 +194,25 @@ pub async fn set_watermark(db: &SqlitePool, account: &ConnectedAccount, uid: i64
     Ok(())
 }
 
-/// Send a message from the account and file a copy in its Sent folder.
+/// Send a message from the account and file a copy in its Sent folder. The
+/// recipients join `user_id`'s address book.
 pub async fn send(
+    db: &SqlitePool,
     mail: &dyn MailFetcher,
+    user_id: &str,
     account: &ConnectedAccount,
     request: SendRequest,
 ) -> AppResult<SendReceipt> {
     let email = OutgoingEmail::new(MailAddress::new(None, &account.email), request)?;
-    mail.send(&account.mail_credentials(), &account.smtp, &email)
-        .await
+    let receipt = mail
+        .send(&account.mail_credentials(), &account.smtp, &email)
+        .await?;
+    let recipients: Vec<_> = email.recipients().cloned().collect();
+    // Sent is sent: a failed address-book update must not look like a failed send.
+    if let Err(e) = contacts::record_sent(db, user_id, &recipients).await {
+        tracing::warn!("Could not update the address book: {e}");
+    }
+    Ok(receipt)
 }
 
 /// Search subjects and senders; returns the newest 50 matches.

@@ -1,6 +1,6 @@
 use crate::AppState;
 use crate::error::AppResult;
-use crate::handlers::auth::require_account;
+use crate::handlers::auth::{require_account, require_user_and_account};
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum_extra::extract::CookieJar;
@@ -43,9 +43,9 @@ pub async fn get_email(
     jar: CookieJar,
     Path((account_id, uid)): Path<(String, i64)>,
 ) -> AppResult<Json<FullEmail>> {
-    let account = require_account(&state, &jar, &account_id).await?;
+    let (user, account) = require_user_and_account(&state, &jar, &account_id).await?;
     Ok(Json(
-        mailbox::get_email(state.mail.as_ref(), &account, uid).await?,
+        mailbox::get_email(&state.db, state.mail.as_ref(), &user.user_id, &account, uid).await?,
     ))
 }
 
@@ -68,9 +68,16 @@ pub async fn send_email(
     Path(account_id): Path<String>,
     Json(request): Json<SendRequest>,
 ) -> AppResult<Json<SendReceipt>> {
-    let account = require_account(&state, &jar, &account_id).await?;
+    let (user, account) = require_user_and_account(&state, &jar, &account_id).await?;
     Ok(Json(
-        mailbox::send(state.mail.as_ref(), &account, request).await?,
+        mailbox::send(
+            &state.db,
+            state.mail.as_ref(),
+            &user.user_id,
+            &account,
+            request,
+        )
+        .await?,
     ))
 }
 

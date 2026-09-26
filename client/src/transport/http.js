@@ -60,6 +60,11 @@ export const transport = {
   rememberEmail: (accountId, uid, data) => request(`${account(accountId)}/remembered/${uid}`, json('POST', data)),
   forgetEmail: (accountId, uid) => request(`${account(accountId)}/remembered/${uid}`, { method: 'DELETE' }),
 
+  searchContacts: (query) => request(`/api/contacts?q=${encodeURIComponent(query)}`),
+  listContacts: () => request('/api/contacts'),
+  saveContact: (contact) => request('/api/contacts', json('POST', contact)),
+  deleteContact: (id) => request(`/api/contacts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
   // Links in emails carry target="_blank", so the browser opens them itself.
   openExternal: (url) => {
     window.open(url, '_blank', 'noopener,noreferrer');

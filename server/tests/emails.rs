@@ -11,7 +11,7 @@ use inboxmax_server::imap_client::{
     SmtpServer,
 };
 use inboxmax_server::rate_limit::AttemptLimiter;
-use inboxmax_server::session::SessionStore;
+use inboxmax_server::session::{SessionStore, UserSession};
 use inboxmax_server::{AppState, api_router};
 use serde_json::Value;
 use sqlx::SqlitePool;
@@ -133,12 +133,20 @@ async fn setup_test_db() -> SqlitePool {
 const ACCOUNT_ID: &str = "test-account-id";
 const SESSION_TOKEN: &str = "test-session-token";
 
+const USER_ID: &str = "test-user";
+
 async fn seed_account(pool: &SqlitePool) {
+    sqlx::query("INSERT INTO users (id, email, password_hash) VALUES (?, 'user@example.com', '!')")
+        .bind(USER_ID)
+        .execute(pool)
+        .await
+        .unwrap();
     sqlx::query(
-        "INSERT INTO accounts (id, email, imap_host, imap_port, smtp_host, smtp_port)
-         VALUES (?, 'test@example.com', 'imap.test.com', 993, 'smtp.test.com', 587)",
+        "INSERT INTO accounts (id, email, imap_host, imap_port, smtp_host, smtp_port, user_id)
+         VALUES (?, 'test@example.com', 'imap.test.com', 993, 'smtp.test.com', 587, ?)",
     )
     .bind(ACCOUNT_ID)
+    .bind(USER_ID)
     .execute(pool)
     .await
     .unwrap();
@@ -156,6 +164,16 @@ async fn build_state_with(mail: Arc<MockMailFetcher>) -> AppState {
     let pool = setup_test_db().await;
     seed_account(&pool).await;
     let sessions = SessionStore::new();
+    sessions
+        .set_user(
+            SESSION_TOKEN,
+            UserSession {
+                user_id: USER_ID.into(),
+                email: "user@example.com".into(),
+                display_name: None,
+            },
+        )
+        .await;
     sessions
         .add_account(
             SESSION_TOKEN,
@@ -632,6 +650,145 @@ async fn sending_explains_what_is_wrong_with_a_message() {
         assert_eq!(parse_response(response).await["error"], message);
     }
     assert!(mail.sent.lock().unwrap().is_empty());
+}
+
+fn contacts_request(
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+    signed_in: bool,
+) -> Request<Body> {
+    let mut request = Request::builder()
+        .uri(uri)
+        .method(method)
+        .header("Content-Type", "application/json");
+    if signed_in {
+        request = request.header("Cookie", format!("inboxmax_session={SESSION_TOKEN}"));
+    }
+    request
+        .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn the_address_book_fills_from_sent_mail_and_can_be_edited() {
+    let state = build_state_with(Arc::new(MockMailFetcher::with_envelopes(vec![]))).await;
+    let app = || build_app(state.clone());
+    app()
+        .oneshot(send_request(
+            serde_json::json!({
+                "to": [{ "name": "Sarah Chen", "email": "Sarah@acme.example" }],
+                "cc": [{ "name": null, "email": "bob@acme.example" }],
+                "subject": "Hi",
+            }),
+            true,
+        ))
+        .await
+        .unwrap();
+
+    let found = parse_response(
+        app()
+            .oneshot(contacts_request("GET", "/api/contacts?q=chen", None, true))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(found[0]["email"], "sarah@acme.example");
+    assert_eq!(found[0]["name"], "Sarah Chen");
+    assert_eq!(found[0]["times_sent"], 1);
+
+    let renamed = parse_response(
+        app()
+            .oneshot(contacts_request(
+                "POST",
+                "/api/contacts",
+                Some(serde_json::json!({ "email": "sarah@acme.example", "name": "Sarah C." })),
+                true,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(renamed["name"], "Sarah C.");
+
+    let response = app()
+        .oneshot(contacts_request(
+            "DELETE",
+            &format!("/api/contacts/{}", renamed["id"]),
+            None,
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let all = parse_response(
+        app()
+            .oneshot(contacts_request("GET", "/api/contacts", None, true))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let emails: Vec<_> = all
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["email"].clone())
+        .collect();
+    assert_eq!(emails, ["bob@acme.example"]);
+
+    let invalid = app()
+        .oneshot(contacts_request(
+            "POST",
+            "/api/contacts",
+            Some(serde_json::json!({ "email": "nope" })),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn the_address_book_is_private() {
+    let state = build_state_with(Arc::new(MockMailFetcher::with_envelopes(vec![]))).await;
+    for request in [
+        contacts_request("GET", "/api/contacts", None, false),
+        contacts_request("GET", "/api/contacts?q=a", None, false),
+        contacts_request(
+            "POST",
+            "/api/contacts",
+            Some(serde_json::json!({ "email": "a@x.example" })),
+            false,
+        ),
+        contacts_request("DELETE", "/api/contacts/1", None, false),
+    ] {
+        let response = build_app(state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    // Someone else's entry cannot be deleted.
+    sqlx::query(
+        "INSERT INTO users (id, email, password_hash) VALUES ('other', 'o@x.example', '!')",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO contacts (user_id, email) VALUES ('other', 'a@x.example') RETURNING id",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    let response = build_app(state.clone())
+        .oneshot(contacts_request(
+            "DELETE",
+            &format!("/api/contacts/{id}"),
+            None,
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

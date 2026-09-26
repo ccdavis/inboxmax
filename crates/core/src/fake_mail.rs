@@ -535,11 +535,31 @@ mod tests {
         }
     }
 
+    /// A database with one user, "u".
+    async fn db() -> SqlitePool {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::MIGRATOR.run(&db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, email, password_hash) VALUES ('u', 'u@example.com', '!')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        db
+    }
+
     #[tokio::test]
     async fn sending_records_the_message_as_it_would_go_out() {
+        let db = db().await;
         let account = connected("outbox-test@example.com");
         let receipt = mailbox::send(
+            &db,
             &FakeMailFetcher,
+            "u",
             &account,
             crate::outgoing::SendRequest {
                 to: vec![MailAddress::new(
@@ -571,13 +591,62 @@ mod tests {
             "Bcc stays off the wire"
         );
         assert!(sent_messages("someone-else@example.com").is_empty());
+
+        // Everyone it went to, Bcc included, is in the address book.
+        let contacts = crate::contacts::list(&db, "u").await.unwrap();
+        let book: Vec<_> = contacts
+            .iter()
+            .map(|c| (c.email.as_str(), c.name.as_deref(), c.times_sent))
+            .collect();
+        assert_eq!(
+            book,
+            [
+                ("hidden@example.com", None, 1),
+                ("sarah.chen@acme.example", Some("Sarah Chen"), 1)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn opening_a_message_adds_its_people_to_the_address_book() {
+        let db = db().await;
+        let account = connected("reader@acme.example");
+        let uid_of = |subject: &str| {
+            1000 - MESSAGES
+                .iter()
+                .position(|m| m.subject.contains(subject))
+                .unwrap() as i64
+        };
+        // A person, a person via Reply-To, and a robot with a reply token.
+        for subject in ["API spec", "Design review", "PR #47"] {
+            mailbox::get_email(&db, &FakeMailFetcher, "u", &account, uid_of(subject))
+                .await
+                .unwrap();
+        }
+        let book: Vec<_> = crate::contacts::list(&db, "u")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.email, c.name))
+            .collect();
+        assert_eq!(
+            book,
+            [(
+                "sarah.chen@acme.example".to_string(),
+                Some("Sarah Chen".to_string())
+            )],
+            "Sarah once (as sender and as Reply-To); the calendar and GitHub robots are skipped"
+        );
     }
 
     #[tokio::test]
     async fn a_refused_recipient_fails_the_send_and_nothing_is_recorded() {
+        let db = db().await;
         let account = connected("refused-test@example.com");
         let error = mailbox::send(
+            &db,
             &FakeMailFetcher,
+            "u",
             &account,
             crate::outgoing::SendRequest {
                 to: vec![
@@ -591,12 +660,18 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("refused"));
         assert!(sent_messages("refused-test@example.com").is_empty());
+        assert!(
+            crate::contacts::list(&db, "u").await.unwrap().is_empty(),
+            "an unsent message adds no one"
+        );
     }
 
     #[tokio::test]
     async fn read_only_mail_clients_refuse_to_send() {
         let error = mailbox::send(
+            &db().await,
             &Unreachable,
+            "u",
             &connected("x@example.com"),
             crate::outgoing::SendRequest {
                 to: vec![MailAddress::new(None, "y@example.com")],

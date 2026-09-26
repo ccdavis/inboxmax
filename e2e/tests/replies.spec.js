@@ -95,14 +95,14 @@ test('a forward carries the original headers and text, but no threading', async 
   await page.getByRole('button', { name: 'Forward' }).click();
 
   const dialog = page.getByRole('dialog', { name: 'Forward' });
-  await expect(dialog.getByLabel('To')).toBeFocused();
+  await expect(dialog.getByLabel('To', { exact: true })).toBeFocused();
   await expect(dialog.getByLabel('Subject')).toHaveValue('Fwd: PR #47 merged: fix dashboard layout');
   const body = dialog.getByLabel('Message');
   await expect(body).toHaveValue(/---------- Forwarded message ----------\nFrom: GitHub \(acme\.example\) <notifications@github\.com>\n/);
   // The HTML body, as text, with its link target written out.
   await expect(body).toHaveValue(/Read more at example\.com \(https:\/\/example\.com\/\)\./);
 
-  await dialog.getByLabel('To').fill('colleague@acme.example');
+  await dialog.getByLabel('To', { exact: true }).fill('colleague@acme.example');
   await send(page, dialog);
   const sent = await lastSent(page);
   expect(sent.to.map((a) => a.email)).toEqual(['colleague@acme.example']);

@@ -37,5 +37,13 @@ export const getRemembered = (accountId) => transport.getRemembered(accountId);
 export const rememberEmail = (accountId, uid, data) => transport.rememberEmail(accountId, uid, data);
 export const forgetEmail = (accountId, uid) => transport.forgetEmail(accountId, uid);
 
+// The address book: [{ id, email, name, times_sent }].
+/** Entries whose address or any word of whose name starts with `query`. */
+export const searchContacts = (query) => transport.searchContacts(query);
+export const listContacts = () => transport.listContacts();
+/** Add an entry or rename one: { email, name }. */
+export const saveContact = (contact) => transport.saveContact(contact);
+export const deleteContact = (id) => transport.deleteContact(id);
+
 /** Open a link from an email outside the app. */
 export const openExternal = (url) => transport.openExternal(url);

@@ -10,7 +10,7 @@ const REFUSED = 'nobody@refused.invalid';
 async function openCompose(page) {
   await page.getByRole('button', { name: /Compose/ }).click();
   const dialog = page.getByRole('dialog', { name: 'New message' });
-  await expect(dialog.getByLabel('To')).toBeFocused();
+  await expect(dialog.getByLabel('To', { exact: true })).toBeFocused();
   return dialog;
 }
 
@@ -85,12 +85,12 @@ test('catches missing and unreadable recipients and a missing subject', async ({
   await dialog.getByRole('button', { name: 'Send' }).click();
   await expect(dialog.getByRole('alert')).toHaveText('Add at least one recipient');
 
-  await dialog.getByLabel('To').fill('someone@');
+  await dialog.getByLabel('To', { exact: true }).fill('someone@');
   await dialog.getByRole('button', { name: 'Send' }).click();
   await expect(dialog.getByRole('alert')).toHaveText('“someone@” is not a valid email address');
-  await expect(dialog.getByLabel('To')).toBeFocused();
+  await expect(dialog.getByLabel('To', { exact: true })).toBeFocused();
 
-  await dialog.getByLabel('To').fill('someone@acme.example');
+  await dialog.getByLabel('To', { exact: true }).fill('someone@acme.example');
   await dialog.getByRole('button', { name: 'Send' }).click();
   const question = dialog.getByRole('group', { name: 'Send without a subject?' });
   await expect(question).toBeVisible();

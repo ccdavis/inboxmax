@@ -4,6 +4,7 @@
 
 use crate::state::{DesktopState, LOCAL_USER_ID};
 use inboxmax_core::account::{self, AccountStatus, ConnectRequest, ConnectResponse};
+use inboxmax_core::contacts::{self, Contact, ContactRequest};
 use inboxmax_core::fake_mail::{self, DEMO_EMAIL, DEMO_HOST, DEMO_PASSWORD};
 use inboxmax_core::imap_client::{EmailEnvelope, FullEmail};
 use inboxmax_core::mailbox::{self, EmailListResponse, RememberRequest, RememberedEmail};
@@ -123,7 +124,7 @@ pub async fn get_email(
     uid: i64,
 ) -> AppResult<FullEmail> {
     let account = state.require_account(&account_id).await?;
-    mailbox::get_email(state.mail.as_ref(), &account, uid).await
+    mailbox::get_email(&state.db, state.mail.as_ref(), LOCAL_USER_ID, &account, uid).await
 }
 
 #[tauri::command]
@@ -143,7 +144,40 @@ pub async fn send_email(
     request: SendRequest,
 ) -> AppResult<SendReceipt> {
     let account = state.require_account(&account_id).await?;
-    mailbox::send(state.mail.as_ref(), &account, request).await
+    mailbox::send(
+        &state.db,
+        state.mail.as_ref(),
+        LOCAL_USER_ID,
+        &account,
+        request,
+    )
+    .await
+}
+
+/// The address book, or with a query, suggestions whose address or name
+/// starts with it.
+#[tauri::command]
+pub async fn list_contacts(
+    state: State<'_, DesktopState>,
+    query: Option<String>,
+) -> AppResult<Vec<Contact>> {
+    match query {
+        Some(query) => contacts::search(&state.db, LOCAL_USER_ID, &query).await,
+        None => contacts::list(&state.db, LOCAL_USER_ID).await,
+    }
+}
+
+#[tauri::command]
+pub async fn save_contact(
+    state: State<'_, DesktopState>,
+    request: ContactRequest,
+) -> AppResult<Contact> {
+    contacts::save(&state.db, LOCAL_USER_ID, request).await
+}
+
+#[tauri::command]
+pub async fn delete_contact(state: State<'_, DesktopState>, id: i64) -> AppResult<()> {
+    contacts::delete(&state.db, LOCAL_USER_ID, id).await
 }
 
 #[tauri::command]

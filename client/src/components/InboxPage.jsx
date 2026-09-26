@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import * as api from '../api';
+import AddressBookDialog from './AddressBookDialog';
 import ComposeDialog from './ComposeDialog';
 import ConnectAccount from './ConnectAccount';
 import Layout from './Layout';
@@ -34,6 +35,7 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
   const [status, setStatus] = useState(null);
   // The open compose dialog: { title, initial }, or null.
   const [compose, setCompose] = useState(null);
+  const [addressBookOpen, setAddressBookOpen] = useState(false);
 
   // Only a mailbox whose password is available can be read.
   const accountId = active?.connected ? active.id : null;
@@ -271,7 +273,7 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
       status={status}
       onDismissStatus={() => setStatus(null)}
       actions={composeButton}
-      inert={compose != null}
+      inert={compose != null || addressBookOpen}
       sidebar={
         <SidePanel
           accounts={{
@@ -281,6 +283,7 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
             onAdd: () => setAddingAccount(true),
             onRemove: handleRemove,
           }}
+          onOpenAddressBook={() => setAddressBookOpen(true)}
           emails={emails}
           remembered={remembered}
           selectedUid={selectedUid}
@@ -328,8 +331,10 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
         onSend={(request) => api.sendEmail(active.id, request)}
         onSent={handleSent}
         onClose={() => setCompose(null)}
+        suggestContacts={api.searchContacts}
       />
     )}
+    {addressBookOpen && <AddressBookDialog onClose={() => setAddressBookOpen(false)} />}
     </>
   );
 }

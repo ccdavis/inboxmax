@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
+import Dialog from './Dialog';
 import RecipientField from './RecipientField';
 import { commitText } from '../utils/addresses';
 
@@ -26,9 +27,9 @@ function field(addresses = []) {
  * `initial` pre-fills a reply or forward: { to, cc, bcc, subject, body,
  * in_reply_to, references, focus: 'to' | 'body' }. `onSend(request)` sends
  * and resolves to the receipt; `onSent(receipt, request)` follows.
+ * `suggestContacts(query)` resolves to address-book entries to suggest.
  */
-export default function ComposeDialog({ from, title = 'New message', initial = {}, onSend, onSent, onClose }) {
-  const titleId = useId();
+export default function ComposeDialog({ from, title = 'New message', initial = {}, onSend, onSent, onClose, suggestContacts }) {
   const subjectId = useId();
   const bodyId = useId();
   const [fields, setFields] = useState(() => ({
@@ -125,7 +126,8 @@ export default function ComposeDialog({ from, title = 'New message', initial = {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       send();
-    } else if (e.key === 'Escape') {
+    } else if (e.key === 'Escape' && !e.defaultPrevented) {
+      // Escape answers an open question first; otherwise it asks to close.
       e.preventDefault();
       if (confirming) setConfirming(null);
       else requestClose();
@@ -149,27 +151,7 @@ export default function ComposeDialog({ from, title = 'New message', initial = {
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/40 sm:items-center sm:p-4">
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        onKeyDown={handleKeyDown}
-        className="flex h-full w-full flex-col bg-surface shadow-xl sm:h-auto sm:max-h-[90dvh] sm:max-w-2xl sm:rounded-xl sm:border sm:border-line"
-      >
-        <div className="flex items-center justify-between border-b border-line px-4 py-2">
-          <h2 id={titleId} className="font-semibold text-ink">{title}</h2>
-          <button
-            type="button"
-            onClick={requestClose}
-            disabled={busy}
-            className="rounded p-1.5 text-ink-muted hover:bg-hover hover:text-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
-            aria-label="Close"
-          >
-            <span aria-hidden="true">✕</span>
-          </button>
-        </div>
-
+    <Dialog title={title} onClose={requestClose} closeDisabled={busy} onKeyDown={handleKeyDown} className="sm:max-w-2xl">
         <form
           className="flex min-h-0 flex-1 flex-col"
           onSubmit={(e) => {
@@ -191,6 +173,7 @@ export default function ComposeDialog({ from, title = 'New message', initial = {
                 inputRef={inputs[key]}
                 error={fieldErrors[key]}
                 onError={setFieldError(key)}
+                suggest={suggestContacts}
                 trailing={key === 'to' ? toggles : null}
               />
             ))}
@@ -248,7 +231,6 @@ export default function ComposeDialog({ from, title = 'New message', initial = {
             )}
           </div>
         </form>
-      </div>
-    </div>
+    </Dialog>
   );
 }
