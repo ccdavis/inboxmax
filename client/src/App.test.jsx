@@ -189,6 +189,22 @@ describe('inbox page', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Your mail connection ended');
   });
 
+  it('moves on quietly when the mailbox was removed on another device', async () => {
+    const unauthorized = Object.assign(new Error('Not authenticated'), { status: 401 });
+    api.getEmails.mockImplementation(async (accountId) => {
+      if (accountId === 'work') throw unauthorized;
+      return inbox([{ uid: 7, subject: 'Home news', from: 'H', date: now }], null);
+    });
+    api.listAccounts
+      .mockResolvedValueOnce([WORK, HOME])
+      .mockResolvedValue([HOME]);
+
+    renderInbox();
+
+    expect(await screen.findByText('Home news')).toBeInTheDocument();
+    expect(screen.queryByText(/Your mail connection ended/)).toBeNull();
+  });
+
   it('starts at the connect screen when there are no mailboxes', async () => {
     api.listAccounts.mockResolvedValue([]);
     renderInbox();

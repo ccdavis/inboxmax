@@ -57,6 +57,14 @@ pub struct ConnectRequest {
     pub imap_port: Option<u16>,
 }
 
+/// Reply to a successful connect, from both the web API and desktop IPC.
+#[derive(Serialize)]
+pub struct ConnectResponse {
+    pub account: AccountStatus,
+    /// Settings came from a recognized provider rather than a guess or override.
+    pub provider_detected: bool,
+}
+
 pub struct ConnectOutcome {
     pub account: ConnectedAccount,
     /// Settings came from a recognized provider rather than a guess or override.

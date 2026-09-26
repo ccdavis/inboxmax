@@ -8,14 +8,7 @@ use crate::handlers::auth::{ensure_session_token, require_user, session_token};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum_extra::extract::CookieJar;
-use inboxmax_core::account::{self, AccountStatus, ConnectRequest};
-use serde::Serialize;
-
-#[derive(Serialize)]
-pub struct ConnectResponse {
-    pub account: AccountStatus,
-    pub provider_detected: bool,
-}
+use inboxmax_core::account::{self, AccountStatus, ConnectRequest, ConnectResponse};
 
 /// GET /api/accounts
 pub async fn list_accounts(
@@ -92,8 +85,7 @@ pub async fn remove(
 ) -> AppResult<Json<serde_json::Value>> {
     let user = require_user(&state, &jar).await?;
     account::delete_account(&state.db, &user.user_id, &account_id).await?;
-    if let Some(token) = session_token(&jar) {
-        state.sessions.remove_account(&token, &account_id).await;
-    }
+    // The user's other devices may hold the password too.
+    state.sessions.remove_account_everywhere(&account_id).await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

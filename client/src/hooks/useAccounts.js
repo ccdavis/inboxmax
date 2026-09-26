@@ -29,10 +29,11 @@ export function useAccounts() {
   const [error, setError] = useState(null);
   const [preferredId, setPreferredId] = useState(readActive);
 
+  /** Reload the list. Resolves to the accounts, or null if loading failed. */
   const refresh = useCallback(async () => {
     try {
-      setError(null);
       const list = await api.listAccounts();
+      setError(null);
       setAccounts(list);
       return list;
     } catch (caught) {
@@ -43,20 +44,11 @@ export function useAccounts() {
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    api.listAccounts()
-      .then((list) => {
-        if (!cancelled) setAccounts(list);
-      })
-      .catch((caught) => {
-        if (cancelled) return;
-        setError(caught);
-        setAccounts([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    // refresh() only sets state after awaiting the request, so this cannot
+    // cause a synchronous re-render loop.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    refresh();
+  }, [refresh]);
 
   // The remembered choice if it still exists, else the first connected
   // mailbox, else the first one.

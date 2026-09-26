@@ -92,7 +92,8 @@ export function useEmails(accountKey) {
       watermarkRef.current = data.watermark_uid ?? null;
       setWatermarkUid(watermarkRef.current);
     } catch (caught) {
-      if (requestId === fetchRequestRef.current) setError(caught);
+      // Tag the failure with its mailbox so callers can tell which one broke.
+      if (requestId === fetchRequestRef.current) setError(Object.assign(caught, { accountId: accountKey }));
     } finally {
       if (requestId === fetchRequestRef.current) {
         setLoading(false);
@@ -102,6 +103,9 @@ export function useEmails(accountKey) {
   }, [accountKey]);
 
   const persistWatermark = useCallback((uid) => {
+    // The loaded emails must belong to this mailbox: after a mailbox is
+    // locked (accountKey null) they are still the previous one's.
+    if (!accountKey || cursorRef.current.accountKey !== accountKey) return Promise.resolve();
     watermarkRef.current = uid;
     setWatermarkUid(uid);
     const save = watermarkQueueRef.current
@@ -154,17 +158,17 @@ export function useEmails(accountKey) {
     setSearchError(null);
   }, []);
 
-  const clearStoredSince = useCallback(() => {
-    const key = storageKey(accountKey);
-    if (key) {
-      try {
-        sessionStorage.removeItem(key);
-      } catch {
-        // Storage is optional.
+  /** Forget every mailbox's stored window (on sign-out). */
+  const clearStoredCursors = useCallback(() => {
+    try {
+      for (const key of Object.keys(sessionStorage)) {
+        if (key.startsWith(SINCE_PREFIX)) sessionStorage.removeItem(key);
       }
+    } catch {
+      // Storage is optional.
     }
     cursorRef.current = { accountKey: null, since: null };
-  }, [accountKey]);
+  }, []);
 
   return {
     emails,
@@ -181,6 +185,6 @@ export function useEmails(accountKey) {
     searchError,
     search,
     clearSearch,
-    clearStoredSince,
+    clearStoredCursors,
   };
 }

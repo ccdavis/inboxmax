@@ -35,7 +35,7 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
   const {
     emails, loading, refreshing, error, lastOpen, watermarkUid,
     fetchEmails, setWatermarkManually, markAllSeen,
-    searchResults, searchLoading, searchError, search, clearSearch, clearStoredSince,
+    searchResults, searchLoading, searchError, search, clearSearch, clearStoredCursors,
   } = useEmails(accountId);
   const {
     remembered, remember, forget, isRemembered,
@@ -49,8 +49,10 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
   }, [accountId, fetchEmails]);
 
   // A 401 means the mailbox password is no longer available (web server
-  // restart or session expiry) or, on the web, that the user is signed out.
+  // restart or session expiry), the mailbox was removed elsewhere, or, on
+  // the web, that the user is signed out.
   const errorStatus = error?.status;
+  const errorAccountId = error?.accountId;
   useEffect(() => {
     if (errorStatus !== 401) return undefined;
     let cancelled = false;
@@ -62,13 +64,19 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
           return;
         }
       }
-      await refreshAccounts();
-      if (!cancelled) setNotice('Your mail connection ended. Enter your mail password to reconnect.');
+      const list = await refreshAccounts();
+      if (cancelled || !list) return;
+      setSelectedUid(null);
+      // Only ask for a password if that mailbox still exists and is locked;
+      // a removed mailbox just drops out of the list.
+      if (list.some((a) => a.id === errorAccountId && !a.connected)) {
+        setNotice('Your mail connection ended. Enter your mail password to reconnect.');
+      }
     })().catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [errorStatus, onSignOut, refreshAccounts]);
+  }, [errorStatus, errorAccountId, onSignOut, refreshAccounts]);
 
   // Leaving the inbox view means the headers on it have been seen. Search
   // results replace the inbox on screen, so leaving during a search does not.
@@ -127,7 +135,7 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
       setNotice(`Could not sign out: ${caught.message}`);
       return;
     }
-    clearStoredSince();
+    clearStoredCursors();
     onSignOut();
   };
 

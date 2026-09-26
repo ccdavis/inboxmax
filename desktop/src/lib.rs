@@ -9,25 +9,18 @@ mod credentials;
 mod state;
 
 use state::DesktopState;
-use std::sync::Arc;
+use std::path::PathBuf;
 use tauri::Manager;
-
-fn mail_fetcher() -> Arc<dyn inboxmax_core::imap_client::MailFetcher> {
-    #[cfg(feature = "fake-mail")]
-    return inboxmax_core::fake_mail::mail_fetcher_from_env();
-    #[cfg(not(feature = "fake-mail"))]
-    Arc::new(inboxmax_core::imap_client::RealMailFetcher)
-}
 
 /// The database lives in the per-user app data directory unless
 /// INBOXMAX_DATA_DIR overrides it (used by tests and for portable installs).
-fn database_url(app: &tauri::App) -> anyhow::Result<String> {
+fn database_path(app: &tauri::App) -> anyhow::Result<PathBuf> {
     let dir = match std::env::var_os("INBOXMAX_DATA_DIR") {
-        Some(dir) => std::path::PathBuf::from(dir),
+        Some(dir) => PathBuf::from(dir),
         None => app.path().app_data_dir()?,
     };
     std::fs::create_dir_all(&dir)?;
-    Ok(format!("sqlite:{}", dir.join("inboxmax.db").display()))
+    Ok(dir.join("inboxmax.db"))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -51,14 +44,21 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let url = database_url(app)?;
+            let path = database_path(app)?;
             let state = tauri::async_runtime::block_on(async {
-                let db = inboxmax_core::db::init_pool(&url).await?;
-                DesktopState::load(db, mail_fetcher(), credentials::system_store())
+                let db = inboxmax_core::db::init_pool_at(&path).await?;
+                let mail = inboxmax_core::default_mail_fetcher();
+                DesktopState::new(db, mail, credentials::system_store())
                     .await
                     .map_err(anyhow::Error::from)
             })?;
             app.manage(state);
+            // Reading saved passwords may wait on keychain prompts; do it
+            // without holding up the window.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                handle.state::<DesktopState>().load_saved_passwords().await;
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -66,9 +66,9 @@ impl SessionStore {
         .await;
     }
 
-    pub async fn remove_account(&self, token: &str, account_id: &str) {
-        let mut sessions = self.sessions.write().await;
-        if let Some(stored) = sessions.get_mut(token) {
+    /// Forget a deleted account's password in every session that holds it.
+    pub async fn remove_account_everywhere(&self, account_id: &str) {
+        for stored in self.sessions.write().await.values_mut() {
             stored.session.accounts.remove(account_id);
         }
     }
@@ -284,8 +284,10 @@ mod tests {
         assert_eq!(ids, ["a", "b"]);
         assert!(store.get_user("token").await.is_some(), "user survives");
 
-        store.remove_account("token", "a").await;
+        store.add_account("other-token", account("a")).await;
+        store.remove_account_everywhere("a").await;
         assert!(store.get_account("token", "a").await.is_none());
+        assert!(store.get_account("other-token", "a").await.is_none());
         assert_eq!(
             store.get_account("token", "b").await.unwrap().email,
             "b@example.com"

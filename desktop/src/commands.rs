@@ -3,7 +3,7 @@
 //! the same JSON shapes so the frontend can use either transport.
 
 use crate::state::{DesktopState, LOCAL_USER_ID};
-use inboxmax_core::account::{self, AccountStatus, ConnectRequest};
+use inboxmax_core::account::{self, AccountStatus, ConnectRequest, ConnectResponse};
 use inboxmax_core::imap_client::{EmailEnvelope, FullEmail};
 use inboxmax_core::mailbox::{self, EmailListResponse, RememberRequest, RememberedEmail};
 use inboxmax_core::{AppError, AppResult};
@@ -31,12 +31,6 @@ pub struct ConnectArgs {
 
 fn default_true() -> bool {
     true
-}
-
-#[derive(Serialize)]
-pub struct ConnectResponse {
-    pub account: AccountStatus,
-    pub provider_detected: bool,
 }
 
 #[tauri::command]

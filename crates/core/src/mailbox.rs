@@ -73,7 +73,7 @@ pub async fn list_emails(
         .bind(&account.id)
         .fetch_optional(db)
         .await?
-        .unwrap_or((None, None, None));
+        .ok_or_else(|| AppError::NotFound("Account not found".into()))?;
 
     let now_ms = Utc::now().timestamp_millis();
     if since.is_some_and(|since| {

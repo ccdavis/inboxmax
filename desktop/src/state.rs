@@ -8,7 +8,7 @@ use inboxmax_core::{AppError, AppResult, ConnectedAccount};
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, watch};
 
 /// Owner of every account in the desktop database. The desktop app has no
 /// sign-in; the operating-system user account is the boundary.
@@ -25,6 +25,8 @@ pub struct DesktopState {
     /// Emails whose password is in the OS store, so listing accounts never
     /// touches the keychain (which may prompt or block).
     saved_emails: RwLock<HashSet<String>>,
+    /// Becomes true once saved passwords have been read.
+    loaded: watch::Sender<bool>,
 }
 
 /// Run a (blocking, possibly prompting) credential-store call off the async runtime.
@@ -35,9 +37,10 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
 }
 
 impl DesktopState {
-    /// Prepare the local profile and reconnect accounts whose passwords
-    /// were saved in the OS credential store.
-    pub async fn load(
+    /// Prepare the local profile. Saved passwords are read afterwards by
+    /// [`Self::load_saved_passwords`], so the window can appear while the
+    /// OS keychain asks for access.
+    pub async fn new(
         db: SqlitePool,
         mail: Arc<dyn MailFetcher>,
         saved: Option<Arc<dyn CredentialStore>>,
@@ -52,35 +55,75 @@ impl DesktopState {
         .execute(&db)
         .await?;
 
-        let state = Self {
+        Ok(Self {
             db,
             mail,
             connected: RwLock::new(HashMap::new()),
             saved,
             saved_emails: RwLock::new(HashSet::new()),
-        };
-        if let Some(store) = state.saved.clone() {
-            let mut connected = state.connected.write().await;
-            let mut saved_emails = state.saved_emails.write().await;
-            for record in account::list_accounts(&state.db, LOCAL_USER_ID).await? {
-                let (store, email) = (store.clone(), record.email.clone());
-                if let Some(password) = blocking(move || store.load(&email)).await {
-                    saved_emails.insert(record.email.clone());
-                    let port = u16::try_from(record.imap_port).unwrap_or(993);
-                    connected.insert(
-                        record.id.clone(),
-                        ConnectedAccount {
-                            id: record.id,
-                            email: record.email,
-                            password,
-                            imap_host: record.imap_host,
-                            imap_port: port,
-                        },
-                    );
-                }
-            }
-        }
+            loaded: watch::channel(false).0,
+        })
+    }
+
+    /// Prepare the profile and wait for saved passwords (used by tests).
+    #[cfg(test)]
+    pub async fn load(
+        db: SqlitePool,
+        mail: Arc<dyn MailFetcher>,
+        saved: Option<Arc<dyn CredentialStore>>,
+    ) -> AppResult<Self> {
+        let state = Self::new(db, mail, saved).await?;
+        state.load_saved_passwords().await;
         Ok(state)
+    }
+
+    /// Reconnect accounts whose passwords are in the OS credential store.
+    /// Account commands wait for this to finish, however it ends.
+    pub async fn load_saved_passwords(&self) {
+        if let Err(e) = self.read_saved_passwords().await {
+            tracing::error!("Could not load saved mailbox passwords: {e}");
+        }
+        self.loaded.send_replace(true);
+    }
+
+    async fn read_saved_passwords(&self) -> AppResult<()> {
+        let Some(store) = self.saved.clone() else {
+            return Ok(());
+        };
+        let records = account::list_accounts(&self.db, LOCAL_USER_ID).await?;
+        let emails: Vec<String> = records.iter().map(|r| r.email.clone()).collect();
+        // One blocking task for all reads, so the keychain sees them in order.
+        let passwords = blocking(move || {
+            emails
+                .iter()
+                .map(|email| store.load(email))
+                .collect::<Vec<_>>()
+        })
+        .await;
+
+        let mut connected = self.connected.write().await;
+        let mut saved_emails = self.saved_emails.write().await;
+        for (record, password) in records.into_iter().zip(passwords) {
+            let Some(password) = password else { continue };
+            saved_emails.insert(record.email.clone());
+            connected.insert(
+                record.id.clone(),
+                ConnectedAccount {
+                    imap_port: u16::try_from(record.imap_port).unwrap_or(993),
+                    id: record.id,
+                    email: record.email,
+                    password,
+                    imap_host: record.imap_host,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    async fn wait_until_loaded(&self) {
+        let mut loaded = self.loaded.subscribe();
+        // The sender lives as long as `self`, so this cannot fail.
+        let _ = loaded.wait_for(|done| *done).await;
     }
 
     pub fn can_save_passwords(&self) -> bool {
@@ -88,6 +131,7 @@ impl DesktopState {
     }
 
     pub async fn list_accounts(&self) -> AppResult<Vec<AccountStatus>> {
+        self.wait_until_loaded().await;
         let connected = self.connected.read().await;
         let saved_emails = self.saved_emails.read().await;
         Ok(account::list_accounts(&self.db, LOCAL_USER_ID)
@@ -110,7 +154,11 @@ impl DesktopState {
                 let (email, password) = (account.email.clone(), account.password.clone());
                 let result = blocking(move || {
                     if remember {
-                        store.save(&email, &password)
+                        // If saving fails, don't leave an older password behind
+                        // to be used on the next launch.
+                        store
+                            .save(&email, &password)
+                            .inspect_err(|_| store.delete(&email))
                     } else {
                         // The user opted out: drop any password saved earlier.
                         store.delete(&email);
@@ -142,6 +190,7 @@ impl DesktopState {
     }
 
     pub async fn require_account(&self, account_id: &str) -> AppResult<ConnectedAccount> {
+        self.wait_until_loaded().await;
         if let Some(account) = self.connected.read().await.get(account_id) {
             return Ok(account.clone());
         }
@@ -268,5 +317,62 @@ mod tests {
             Err(AppError::NotFound(_))
         ));
         assert!(state.list_accounts().await.unwrap().is_empty());
+    }
+
+    /// A keychain that refuses writes but still holds an old password.
+    struct ReadOnlyStore(MemoryStore);
+
+    impl CredentialStore for ReadOnlyStore {
+        fn save(&self, _: &str, _: &str) -> Result<(), String> {
+            Err("keychain is locked".into())
+        }
+        fn load(&self, account: &str) -> Option<String> {
+            self.0.load(account)
+        }
+        fn delete(&self, account: &str) {
+            self.0.delete(account)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_save_does_not_leave_an_old_password_behind() {
+        let old = MemoryStore::default();
+        old.save("me@example.com", "old-password").unwrap();
+        let store = Arc::new(ReadOnlyStore(old));
+        let state = DesktopState::load(db().await, Arc::new(AcceptAll), Some(store.clone()))
+            .await
+            .unwrap();
+
+        let (_, saved) = connect(&state, "me@example.com", true).await;
+
+        assert!(!saved);
+        assert_eq!(store.load("me@example.com"), None, "stale password removed");
+    }
+
+    #[tokio::test]
+    async fn account_commands_wait_for_saved_passwords() {
+        let db = db().await;
+        let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::default());
+        let first = DesktopState::load(db.clone(), Arc::new(AcceptAll), Some(store.clone()))
+            .await
+            .unwrap();
+        let (id, _) = connect(&first, "saved@example.com", true).await;
+
+        let state = Arc::new(
+            DesktopState::new(db, Arc::new(AcceptAll), Some(store))
+                .await
+                .unwrap(),
+        );
+        let pending = tokio::spawn({
+            let state = state.clone();
+            async move { state.list_accounts().await.unwrap() }
+        });
+        tokio::task::yield_now().await;
+        assert!(!pending.is_finished(), "listing waits for the keychain");
+
+        state.load_saved_passwords().await;
+        let accounts = pending.await.unwrap();
+        assert!(accounts[0].connected && accounts[0].password_saved);
+        assert!(state.require_account(&id).await.is_ok());
     }
 }

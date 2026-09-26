@@ -111,16 +111,6 @@ impl MailFetcher for FakeMailFetcher {
     }
 }
 
-/// The real IMAP client, or the fake mailbox when `INBOXMAX_FAKE_MAIL=1`.
-pub fn mail_fetcher_from_env() -> std::sync::Arc<dyn MailFetcher> {
-    if std::env::var("INBOXMAX_FAKE_MAIL").is_ok_and(|v| v == "1") {
-        tracing::warn!("Using the fake demo mailbox (INBOXMAX_FAKE_MAIL=1)");
-        std::sync::Arc::new(FakeMailFetcher)
-    } else {
-        std::sync::Arc::new(crate::imap_client::RealMailFetcher)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

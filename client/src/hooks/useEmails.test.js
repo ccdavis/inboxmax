@@ -158,7 +158,9 @@ describe('useEmails', () => {
   it('serializes watermark writes in user order', async () => {
     const resolvers = [];
     api.setWatermark.mockImplementation(() => new Promise((resolve) => resolvers.push(resolve)));
+    api.getEmails.mockResolvedValue(makeEmailResponse());
     const { result } = renderHook(() => useEmails(ACCOUNT));
+    await fetchEmails(result);
 
     let first;
     let second;
@@ -198,6 +200,32 @@ describe('useEmails', () => {
     resolveOther(makeEmailResponse({ emails: [], watermark_uid: 5 }));
     await act(async () => pending);
     expect(result.current.watermarkUid).toBe(5);
+  });
+
+  it('never saves a marker for a mailbox whose emails are not loaded', async () => {
+    api.getEmails.mockResolvedValue(makeEmailResponse({ watermark_uid: 90 }));
+    const { result, rerender } = renderHook(({ account }) => useEmails(account), {
+      initialProps: { account: ACCOUNT },
+    });
+    await fetchEmails(result);
+
+    // The mailbox gets locked: no account, but the old emails are still loaded.
+    rerender({ account: null });
+    await act(async () => result.current.markAllSeen());
+    await act(async () => result.current.setWatermarkManually(100));
+
+    expect(api.setWatermark).not.toHaveBeenCalled();
+  });
+
+  it('clears every mailbox\'s stored window', () => {
+    sessionStorage.setItem('inboxmax_since:a', '1');
+    sessionStorage.setItem('inboxmax_since:b', '2');
+    sessionStorage.setItem('unrelated', 'keep');
+    const { result } = renderHook(() => useEmails(ACCOUNT));
+
+    act(() => result.current.clearStoredCursors());
+
+    expect(Object.keys(sessionStorage)).toEqual(['unrelated']);
   });
 
   describe('markAllSeen', () => {

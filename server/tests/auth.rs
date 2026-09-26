@@ -457,3 +457,54 @@ async fn accounts_require_a_signed_in_user() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn removing_a_mailbox_disconnects_it_on_every_device() {
+    let state = state().await;
+    let (laptop, _) = register(&state, "user@example.com").await;
+    let phone_response = api_router(state.clone())
+        .oneshot(signin_request("user@example.com", "password123"))
+        .await
+        .unwrap();
+    let phone = merge_cookies("", &phone_response);
+
+    let mut account_id = String::new();
+    let mut cookies = Vec::new();
+    for device in [laptop, phone] {
+        let response = api_router(state.clone())
+            .oneshot(json_request(
+                "POST",
+                "/api/accounts",
+                serde_json::json!({ "email": "work@example.com", "password": "pw", "imap_host": "imap.example.com" }),
+                Some(&device),
+            ))
+            .await
+            .unwrap();
+        let device = merge_cookies(&device, &response);
+        account_id = body_json(response).await["account"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        cookies.push(device);
+    }
+
+    let removed = api_router(state.clone())
+        .oneshot(json_request(
+            "DELETE",
+            &format!("/api/accounts/{account_id}"),
+            serde_json::json!({}),
+            Some(&cookies[0]),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(removed.status(), StatusCode::OK);
+
+    let phone_read = api_router(state.clone())
+        .oneshot(get_request(
+            &format!("/api/accounts/{account_id}/emails"),
+            &cookies[1],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(phone_read.status(), StatusCode::UNAUTHORIZED);
+}
