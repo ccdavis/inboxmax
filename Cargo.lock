@@ -1178,32 +1178,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "inboxmax-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-imap",
+ "async-native-tls",
+ "async-trait",
+ "axum",
+ "chrono",
+ "futures",
+ "imap-proto",
+ "mail-parser",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "inboxmax-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "argon2",
- "async-imap",
- "async-native-tls",
  "async-trait",
  "axum",
  "axum-extra",
  "chrono",
  "dotenvy",
- "futures",
  "hex",
  "http-body-util",
- "imap-proto",
- "mail-parser",
+ "inboxmax-core",
  "rand_core",
  "serde",
  "serde_json",
  "sha2",
  "sqlx",
- "thiserror 2.0.18",
  "time",
  "tokio",
- "tokio-util",
  "tower",
  "tower-http",
  "tracing",
