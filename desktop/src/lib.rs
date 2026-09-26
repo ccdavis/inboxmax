@@ -65,6 +65,7 @@ pub fn run() {
             commands::app_info,
             commands::list_accounts,
             commands::connect_account,
+            commands::connect_demo,
             commands::remove_account,
             commands::list_emails,
             commands::get_email,

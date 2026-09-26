@@ -22,7 +22,7 @@ const POLL_INTERVAL_MS = 2 * 60 * 1000;
 export default function InboxPage({ onSignOut, canSavePasswords = false }) {
   const {
     accounts, loaded, error: accountsError, active,
-    selectAccount, connectAccount, removeAccount, refresh: refreshAccounts,
+    selectAccount, connectAccount, connectDemo, removeAccount, refresh: refreshAccounts,
   } = useAccounts();
   const [addingAccount, setAddingAccount] = useState(false);
   const [selectedUid, setSelectedUid] = useState(null);
@@ -123,6 +123,16 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
     }
   };
 
+  const handleDemo = async () => {
+    const wasShowing = accountId;
+    const result = await connectDemo();
+    setAddingAccount(false);
+    resetView();
+    setNotice(null);
+    // Reopening the demo while it is showing starts it over, so reload it.
+    if (result.account.id === wasShowing) fetchEmails();
+  };
+
   const handleRemove = async (id) => {
     await removeAccount(id);
     if (id === active?.id) resetView();
@@ -175,6 +185,7 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
     return (
       <ConnectAccount
         onSubmit={handleConnect}
+        onDemo={api.isDesktop ? handleDemo : undefined}
         onCancel={accounts.length > 0 ? () => setAddingAccount(false) : undefined}
         onSignOut={signOut}
         notice={connectNotice}

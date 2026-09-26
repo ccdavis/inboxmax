@@ -82,6 +82,7 @@ describe('auth screens', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     expect(onSignOut).toHaveBeenCalled();
     expect(screen.queryByRole('checkbox')).toBeNull();
+    expect(screen.queryByRole('button', { name: /demo/ })).toBeNull();
 
     fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'me@example.com' } });
     fireEvent.change(screen.getByLabelText(/^Password/), { target: { value: 'secret' } });
@@ -116,5 +117,24 @@ describe('auth screens', () => {
     expect(onSubmit).toHaveBeenCalledWith({ email: 'me@example.com', password: 'nope', remember: false });
     fireEvent.click(screen.getByRole('button', { name: 'Back to inbox' }));
     expect(onCancel).toHaveBeenCalled();
+  });
+
+  it('connect screen opens the demo mailbox without filling in the form', async () => {
+    const onSubmit = vi.fn();
+    const onDemo = vi.fn()
+      .mockRejectedValueOnce(new Error('Could not open the demo'))
+      .mockReturnValue(new Promise(() => {}));
+    renderAt('/connect', <ConnectAccount onSubmit={onSubmit} onDemo={onDemo} />);
+
+    const demo = screen.getByRole('button', { name: 'Try the demo mailbox' });
+    expect(demo).toHaveAccessibleDescription(/no account or password needed/);
+    fireEvent.click(demo);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not open the demo');
+
+    fireEvent.click(demo);
+    expect(await screen.findByRole('button', { name: 'Opening demo…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Connect Email Account' })).toBeDisabled();
+    expect(onDemo).toHaveBeenCalledTimes(2);
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 });

@@ -43,6 +43,9 @@ export const transport = {
     delete body.remember;
     return request('/api/accounts', json('POST', body));
   },
+  // Mailbox addresses are unique across the server's users, so one shared
+  // demo address would only work for the first person to open it.
+  connectDemo: () => Promise.reject(new ApiError(400, 'The demo mailbox is only in the desktop app')),
   removeAccount: (accountId) => request(account(accountId), { method: 'DELETE' }),
 
   getEmails: (accountId, since) =>

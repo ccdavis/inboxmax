@@ -62,11 +62,11 @@ export function FormField({ label, hint, small = false, ...inputProps }) {
   );
 }
 
-export function SubmitButton({ loading, loadingText, children }) {
+export function SubmitButton({ loading, loadingText, disabled = false, children }) {
   return (
     <button
       type="submit"
-      disabled={loading}
+      disabled={loading || disabled}
       className="w-full py-2.5 bg-gradient-to-r from-indigo-500 to-violet-500 hover:from-indigo-600 hover:to-violet-600 disabled:opacity-50 text-white font-medium rounded-lg transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 focus-visible:ring-offset-surface"
     >
       {loading ? loadingText : children}

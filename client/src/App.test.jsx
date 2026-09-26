@@ -13,6 +13,7 @@ vi.mock('./api', () => ({
   getSession: vi.fn(),
   listAccounts: vi.fn(),
   connectAccount: vi.fn(),
+  connectDemo: vi.fn(),
   removeAccount: vi.fn(),
   getEmails: vi.fn(),
   getRemembered: vi.fn(),
@@ -210,6 +211,7 @@ describe('inbox page', () => {
     renderInbox();
     expect(await screen.findByRole('heading', { name: 'Connect your email' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Sign out' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /demo/ })).toBeNull();
   });
 });
 
@@ -250,6 +252,22 @@ describe('desktop app', () => {
     api.listAccounts.mockResolvedValue([]);
     render(<DesktopApp />);
     expect(await screen.findByRole('checkbox', { name: /keychain/ })).toBeChecked();
+  });
+
+  it('opens the demo mailbox from the connect screen', async () => {
+    const DEMO = { id: 'demo', email: 'demo@inboxmax.invalid', connected: true, password_saved: false };
+    api.listAccounts.mockResolvedValue([]);
+    api.connectDemo.mockResolvedValue({ account: DEMO, provider_detected: false });
+    render(<DesktopApp />);
+
+    const demo = await screen.findByRole('button', { name: 'Try the demo mailbox' });
+    api.listAccounts.mockResolvedValue([DEMO]);
+    fireEvent.click(demo);
+
+    expect(await screen.findByText('Thirty')).toBeInTheDocument();
+    expect(api.connectDemo).toHaveBeenCalled();
+    expect(api.connectAccount).not.toHaveBeenCalled();
+    expect(api.getEmails.mock.calls.map(([accountId]) => accountId)).toContain('demo');
   });
 
   it('opens email links in the system browser', async () => {

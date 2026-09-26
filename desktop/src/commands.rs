@@ -4,6 +4,7 @@
 
 use crate::state::{DesktopState, LOCAL_USER_ID};
 use inboxmax_core::account::{self, AccountStatus, ConnectRequest, ConnectResponse};
+use inboxmax_core::fake_mail::{self, DEMO_EMAIL, DEMO_HOST, DEMO_PASSWORD};
 use inboxmax_core::imap_client::{EmailEnvelope, FullEmail};
 use inboxmax_core::mailbox::{self, EmailListResponse, RememberRequest, RememberedEmail};
 use inboxmax_core::{AppError, AppResult};
@@ -51,6 +52,30 @@ pub async fn connect_account(
     state: State<'_, DesktopState>,
     request: ConnectArgs,
 ) -> AppResult<ConnectResponse> {
+    connect(&state, request).await
+}
+
+/// Open the generated demo mailbox in its starting state (some new mail,
+/// some seen, a couple remembered), so the app can be tried without a mail
+/// account. Opening it again starts it over.
+#[tauri::command]
+pub async fn connect_demo(state: State<'_, DesktopState>) -> AppResult<ConnectResponse> {
+    let response = connect(
+        &state,
+        ConnectArgs {
+            email: DEMO_EMAIL.into(),
+            password: DEMO_PASSWORD.into(),
+            imap_host: Some(DEMO_HOST.into()),
+            imap_port: None,
+            remember: false,
+        },
+    )
+    .await?;
+    fake_mail::reset_demo(&state.db, &response.account.id).await?;
+    Ok(response)
+}
+
+async fn connect(state: &DesktopState, request: ConnectArgs) -> AppResult<ConnectResponse> {
     let remember = request.remember;
     let outcome = account::connect_account(
         &state.db,

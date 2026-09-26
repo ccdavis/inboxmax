@@ -56,18 +56,55 @@ describe('EmailList', () => {
     expect(screen.getByText(/1 earlier email you've already seen/)).toBeInTheDocument();
   });
 
-  it('greys out seen rows and highlights the marker', () => {
+  it('highlights the marker row as the line and greys out everything below it', () => {
     renderList();
+    expect(rowFor('Newest').className).toContain('bg-canvas');
+    expect(rowFor('Marker').className).toContain('bg-marker-row');
+    expect(within(rowFor('Marker')).getByLabelText('Last seen marker')).toBeInTheDocument();
     expect(rowFor('Seen today').className).toContain('bg-seen');
-    expect(rowFor('Newest').className).not.toContain('bg-seen');
-    expect(rowFor('Marker').className).toContain('bg-marker');
-    expect(screen.getByLabelText('Last seen marker')).toBeInTheDocument();
+    // The highlighted row is the line, so no separate divider.
+    expect(screen.queryByRole('separator')).toBeNull();
+  });
+
+  it('keeps the marker row in view when it is from an earlier day', () => {
+    const emails = [
+      { uid: 9, subject: 'New today', from: 'Ann', date: hoursAgo(0) },
+      { uid: 8, subject: 'Seen yesterday', from: 'Bob', date: daysAgo(1.5) },
+      { uid: 7, subject: 'Seen before that', from: 'Cy', date: daysAgo(2) },
+    ];
+    renderList({ emails, watermarkUid: 8 });
+    expect(rowFor('Seen yesterday').className).toContain('bg-marker-row');
+    expect(screen.queryByText('Seen before that')).toBeNull();
+  });
+
+  it('draws a divider where the marker would be when its email is not listed', () => {
+    const emails = [
+      { uid: 9, subject: 'New today', from: 'Ann', date: hoursAgo(0) },
+      { uid: 7, subject: 'Seen today', from: 'Cy', date: hoursAgo(0) },
+    ];
+    renderList({ emails, watermarkUid: 8 });
+    const items = [...screen.getByRole('list').children];
+    const divider = screen.getByRole('separator', { name: /Already seen/ });
+    expect(items.indexOf(divider)).toBe(items.indexOf(rowFor('Seen today')) - 1);
   });
 
   it('shows everything as new when there is no marker yet', () => {
     renderList({ watermarkUid: null, lastOpen: null });
     expect(screen.getAllByRole('listitem')).toHaveLength(EMAILS.length);
     expect(screen.getByRole('heading', { name: '5 emails' })).toBeInTheDocument();
+    expect(screen.queryByRole('separator')).toBeNull();
+  });
+
+  it('marks everything seen from the header', () => {
+    const { onSetWatermark } = renderList();
+    fireEvent.click(screen.getByRole('button', { name: 'Mark all seen' }));
+    expect(onSetWatermark).toHaveBeenCalledWith(6);
+  });
+
+  it('offers no mark-all-seen when nothing is new', () => {
+    renderList({ watermarkUid: 6 });
+    expect(screen.getByRole('heading', { name: 'No new emails' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Mark all seen' })).toBeNull();
   });
 
   it('hides seen rows but keeps the marker when asked', () => {

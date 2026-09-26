@@ -19,6 +19,8 @@ export const signout = () => transport.signout();
 export const listAccounts = () => transport.listAccounts();
 /** `details`: { email, password, imap_host?, imap_port?, remember? } */
 export const connectAccount = (details) => transport.connectAccount(details);
+/** Add or reopen the generated demo mailbox (desktop only). */
+export const connectDemo = () => transport.connectDemo();
 export const removeAccount = (accountId) => transport.removeAccount(accountId);
 
 // Inbox operations on one mailbox.

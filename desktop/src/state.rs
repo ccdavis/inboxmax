@@ -2,7 +2,8 @@
 //! and the accounts whose passwords are available.
 
 use crate::credentials::CredentialStore;
-use inboxmax_core::account::{self, AccountStatus};
+use inboxmax_core::account::{self, AccountRecord, AccountStatus};
+use inboxmax_core::fake_mail::{DEMO_PASSWORD, is_demo_host};
 use inboxmax_core::imap_client::MailFetcher;
 use inboxmax_core::{AppError, AppResult, ConnectedAccount};
 use sqlx::SqlitePool;
@@ -34,6 +35,16 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
     tokio::task::spawn_blocking(f)
         .await
         .expect("credential store task panicked")
+}
+
+fn connected_account(record: AccountRecord, password: String) -> ConnectedAccount {
+    ConnectedAccount {
+        imap_port: u16::try_from(record.imap_port).unwrap_or(993),
+        id: record.id,
+        email: record.email,
+        password,
+        imap_host: record.imap_host,
+    }
 }
 
 impl DesktopState {
@@ -87,10 +98,24 @@ impl DesktopState {
     }
 
     async fn read_saved_passwords(&self) -> AppResult<()> {
+        let (demo, records): (Vec<_>, Vec<_>) = account::list_accounts(&self.db, LOCAL_USER_ID)
+            .await?
+            .into_iter()
+            .partition(|r| is_demo_host(&r.imap_host));
+        // The demo mailbox needs no password, so it is always open.
+        {
+            let mut connected = self.connected.write().await;
+            for record in demo {
+                connected.insert(
+                    record.id.clone(),
+                    connected_account(record, DEMO_PASSWORD.into()),
+                );
+            }
+        }
+
         let Some(store) = self.saved.clone() else {
             return Ok(());
         };
-        let records = account::list_accounts(&self.db, LOCAL_USER_ID).await?;
         let emails: Vec<String> = records.iter().map(|r| r.email.clone()).collect();
         // One blocking task for all reads, so the keychain sees them in order.
         let passwords = blocking(move || {
@@ -106,16 +131,7 @@ impl DesktopState {
         for (record, password) in records.into_iter().zip(passwords) {
             let Some(password) = password else { continue };
             saved_emails.insert(record.email.clone());
-            connected.insert(
-                record.id.clone(),
-                ConnectedAccount {
-                    imap_port: u16::try_from(record.imap_port).unwrap_or(993),
-                    id: record.id,
-                    email: record.email,
-                    password,
-                    imap_host: record.imap_host,
-                },
-            );
+            connected.insert(record.id.clone(), connected_account(record, password));
         }
         Ok(())
     }
@@ -150,6 +166,8 @@ impl DesktopState {
     /// and possible. Returns whether it was saved to the OS store.
     pub async fn add_connected(&self, account: ConnectedAccount, remember: bool) -> bool {
         let saved = match self.saved.clone() {
+            // The demo mailbox reopens on launch without a saved password.
+            _ if is_demo_host(&account.imap_host) => false,
             Some(store) => {
                 let (email, password) = (account.email.clone(), account.password.clone());
                 let result = blocking(move || {
@@ -217,6 +235,7 @@ mod tests {
     use super::*;
     use crate::credentials::MemoryStore;
     use inboxmax_core::account::ConnectRequest;
+    use inboxmax_core::fake_mail::{DEMO_EMAIL, DEMO_HOST};
     use inboxmax_core::imap_client::{EmailEnvelope, FullEmail, MailCredentials, MailboxSnapshot};
 
     struct AcceptAll;
@@ -317,6 +336,43 @@ mod tests {
             Err(AppError::NotFound(_))
         ));
         assert!(state.list_accounts().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_demo_mailbox_reopens_without_the_keychain() {
+        let db = db().await;
+        let store = Arc::new(MemoryStore::default());
+        let state = DesktopState::load(db.clone(), Arc::new(AcceptAll), Some(store.clone()))
+            .await
+            .unwrap();
+        let outcome = account::connect_account(
+            &state.db,
+            state.mail.as_ref(),
+            LOCAL_USER_ID,
+            ConnectRequest {
+                email: DEMO_EMAIL.into(),
+                password: DEMO_PASSWORD.into(),
+                imap_host: Some(DEMO_HOST.into()),
+                imap_port: None,
+            },
+        )
+        .await
+        .unwrap();
+        let id = outcome.account.id.clone();
+
+        assert!(!state.add_connected(outcome.account, true).await);
+        assert_eq!(
+            store.load(DEMO_EMAIL),
+            None,
+            "nothing written to the keychain"
+        );
+
+        // Relaunch with no keychain at all: the demo is still open.
+        let relaunched = DesktopState::load(db, Arc::new(AcceptAll), None)
+            .await
+            .unwrap();
+        assert!(relaunched.list_accounts().await.unwrap()[0].connected);
+        assert!(relaunched.require_account(&id).await.is_ok());
     }
 
     /// A keychain that refuses writes but still holds an old password.

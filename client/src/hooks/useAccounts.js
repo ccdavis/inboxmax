@@ -64,13 +64,21 @@ export function useAccounts() {
     writeActive(id);
   }, []);
 
-  /** Verify and add (or reconnect) a mailbox, then show it. */
-  const connectAccount = useCallback(async (details) => {
-    const result = await api.connectAccount(details);
+  const connectWith = useCallback(async (connect) => {
+    const result = await connect();
     await refresh();
     selectAccount(result.account.id);
     return result;
   }, [refresh, selectAccount]);
+
+  /** Verify and add (or reconnect) a mailbox, then show it. */
+  const connectAccount = useCallback(
+    (details) => connectWith(() => api.connectAccount(details)),
+    [connectWith],
+  );
+
+  /** Add (or reopen) the demo mailbox, then show it. */
+  const connectDemo = useCallback(() => connectWith(api.connectDemo), [connectWith]);
 
   const removeAccount = useCallback(async (id) => {
     await api.removeAccount(id);
@@ -85,6 +93,7 @@ export function useAccounts() {
     active,
     selectAccount,
     connectAccount,
+    connectDemo,
     removeAccount,
     refresh,
   };

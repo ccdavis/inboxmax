@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import * as api from '../api';
 import { AuthForm, AuthLayout, FormError, FormField, SubmitButton } from './AuthLayout';
 
@@ -9,9 +9,11 @@ const LINK_BUTTON =
  * Add or reconnect a mailbox. `onSubmit(details)` does the connecting and
  * throws on failure. Desktop passes `canSavePasswords` to offer saving the
  * password in the system keychain; the web app keeps it in server memory.
+ * `onDemo`, when given, offers the demo mailbox instead of an account.
  */
 export default function ConnectAccount({
   onSubmit,
+  onDemo,
   onCancel,
   onSignOut,
   notice,
@@ -24,25 +26,31 @@ export default function ConnectAccount({
   const [password, setPassword] = useState('');
   const [remember, setRemember] = useState(true);
   const [error, setError] = useState(null);
-  const [loading, setLoading] = useState(false);
+  // Which action is in progress: 'connect', 'demo', or null.
+  const [busy, setBusy] = useState(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [imapHost, setImapHost] = useState('');
   const [imapPort, setImapPort] = useState('');
+  const demoHintId = useId();
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setLoading(true);
+  const run =async (action, connect) => {
+    setBusy(action);
     setError(null);
     try {
-      const details = { email, password };
-      if (imapHost.trim()) details.imap_host = imapHost.trim();
-      if (imapPort) details.imap_port = Number(imapPort);
-      if (canSavePasswords) details.remember = remember;
-      await onSubmit(details);
+      await connect();
     } catch (err) {
       setError(err.message);
-      setLoading(false);
+      setBusy(null);
     }
+  };
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    const details = { email, password };
+    if (imapHost.trim()) details.imap_host = imapHost.trim();
+    if (imapPort) details.imap_port = Number(imapPort);
+    if (canSavePasswords) details.remember = remember;
+    run('connect', () => onSubmit(details));
   };
 
   const topRight = (onCancel || onSignOut) && (
@@ -143,7 +151,31 @@ export default function ConnectAccount({
           </div>
         )}
 
-        <SubmitButton loading={loading} loadingText="Connecting…">Connect Email Account</SubmitButton>
+        <SubmitButton loading={busy === 'connect'} disabled={busy != null} loadingText="Connecting…">
+          Connect Email Account
+        </SubmitButton>
+
+        {onDemo && (
+          <div className="space-y-2">
+            <div className="flex items-center gap-3 text-xs text-ink-muted" aria-hidden="true">
+              <span className="h-px flex-1 bg-line" />
+              or
+              <span className="h-px flex-1 bg-line" />
+            </div>
+            <button
+              type="button"
+              onClick={() => run('demo', onDemo)}
+              disabled={busy != null}
+              aria-describedby={demoHintId}
+              className="w-full py-2.5 border border-line bg-surface hover:bg-canvas-subtle disabled:opacity-50 text-ink-soft font-medium rounded-lg transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+            >
+              {busy === 'demo' ? 'Opening demo…' : 'Try the demo mailbox'}
+            </button>
+            <p id={demoHintId} className="text-xs text-ink-muted text-center">
+              Sample emails, no account or password needed.
+            </p>
+          </div>
+        )}
 
         <div className="text-xs text-ink-muted text-center leading-relaxed space-y-2">
           <p>

@@ -2,9 +2,11 @@
 
 An email client for people who scan subject lines. Shows emails since you last opened the app, with a "remember this" bookmark feature.
 
-Emails whose sender and subject you have already scanned sit below a "last seen" marker and are greyed out;
-new ones stay highlighted. The marker advances when you leave the page, or you can place it yourself
-(click ▾ on a row, or use the ↑/↓ keys in the list). The interface follows your system's light or dark mode.
+New emails sit at the top. Below them, the last one you had seen is highlighted across the list,
+like a selected message, and everything older is a greyed-out band, so you can see where you left off.
+The marker advances when you leave the page or choose "Mark all seen", or you can place it yourself
+(click ▾ on a row, or use the ↑/↓ keys in the list).
+The interface follows your system's light or dark mode.
 
 Works with IMAP providers that support password or app-password authentication
 (Gmail, Outlook, Yahoo, and others), and handles several mailboxes side by side.

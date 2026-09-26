@@ -1,4 +1,4 @@
-import { useRef, useEffect } from 'react';
+import { Fragment, useRef, useEffect } from 'react';
 import EmailRow from './EmailRow';
 import Spinner from './Spinner';
 import { isToday } from '../utils/dates';
@@ -18,9 +18,26 @@ function EmptyState({ title, children }) {
 }
 
 /**
+ * The line between new emails (above) and ones already seen (below), for
+ * when the last-seen email itself is not in the list to be highlighted.
+ */
+function SeenDivider() {
+  return (
+    <li role="separator" aria-label="Already seen: emails below this line" className="flex items-center gap-2 px-3 py-1.5 bg-canvas">
+      <span className="h-0.5 flex-1 rounded-full bg-marker-line" aria-hidden="true" />
+      <span className="shrink-0 rounded-full bg-marker px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-accent" aria-hidden="true">
+        Already seen
+      </span>
+      <span className="h-0.5 flex-1 rounded-full bg-marker-line" aria-hidden="true" />
+    </li>
+  );
+}
+
+/**
  * The main pane. For the inbox it shows every unseen email (UID above the
- * last-seen marker) plus the rest of today's; older seen emails are browsed
- * by day in the sidebar. In search mode it shows the results instead.
+ * last-seen marker), then the highlighted marker email and the rest of
+ * today's; older seen emails are browsed by day in the sidebar. In search
+ * mode it shows the results instead.
  */
 export default function EmailList({
   emails,
@@ -42,14 +59,24 @@ export default function EmailList({
   const now = new Date();
   const isUnseen = (email) => watermarkUid == null || email.uid > watermarkUid;
 
+  // The marker email always shows, whatever its day, so the line does too.
   const baseEmails = searchMode
     ? emails
-    : emails.filter((email) => isUnseen(email) || isToday(email.date, now));
+    : emails.filter((email) => isUnseen(email) || isToday(email.date, now) || email.uid === watermarkUid);
   const earlierSeenCount = searchMode ? 0 : emails.length - baseEmails.length;
   const visibleEmails = !searchMode && hideSeen && watermarkUid != null
     ? baseEmails.filter((email) => email.uid >= watermarkUid)
     : baseEmails;
   const newCount = baseEmails.filter(isUnseen).length;
+  const newestUid = emails.reduce((max, email) => Math.max(max, email.uid), 0);
+  // The highlighted marker row is the line between new and seen. When that
+  // email is not in the list, a divider stands in for it: above the first
+  // seen row, or after the list if every row is new.
+  let dividerIndex = -1;
+  if (!searchMode && watermarkUid != null && !visibleEmails.some((email) => email.uid === watermarkUid)) {
+    dividerIndex = visibleEmails.findIndex((email) => !isUnseen(email));
+    if (dividerIndex === -1) dividerIndex = visibleEmails.length;
+  }
 
   let headerText;
   if (searchMode) {
@@ -126,6 +153,15 @@ export default function EmailList({
           {refreshing && <Spinner size="sm" label="Refreshing" />}
         </div>
         <div className="flex items-center gap-1 shrink-0">
+          {!searchMode && newCount > 0 && (
+            <button
+              type="button"
+              onClick={() => onSetWatermark(newestUid)}
+              className="text-xs px-2 py-1.5 rounded text-accent hover:text-accent-hover hover:bg-hover transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+            >
+              Mark all seen
+            </button>
+          )}
           {!searchMode && watermarkUid != null && (
             <button
               type="button"
@@ -184,18 +220,21 @@ export default function EmailList({
 
         {!loading && visibleEmails.length > 0 && (
           <ul>
-            {visibleEmails.map((email) => (
-              <EmailRow
-                key={email.uid}
-                email={email}
-                onClick={onSelectEmail}
-                isRemembered={isRemembered(email.uid)}
-                onToggleRemember={onToggleRemember}
-                isSeen={watermarkUid != null && email.uid < watermarkUid}
-                isWatermark={email.uid === watermarkUid}
-                onSetWatermark={onSetWatermark}
-              />
+            {visibleEmails.map((email, index) => (
+              <Fragment key={email.uid}>
+                {index === dividerIndex && <SeenDivider />}
+                <EmailRow
+                  email={email}
+                  onClick={onSelectEmail}
+                  isRemembered={isRemembered(email.uid)}
+                  onToggleRemember={onToggleRemember}
+                  isSeen={!searchMode && !isUnseen(email)}
+                  isWatermark={email.uid === watermarkUid}
+                  onSetWatermark={onSetWatermark}
+                />
+              </Fragment>
             ))}
+            {dividerIndex === visibleEmails.length && <SeenDivider />}
           </ul>
         )}
 
