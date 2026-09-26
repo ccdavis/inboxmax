@@ -2,20 +2,22 @@ import { useState, useCallback, useRef } from 'react';
 import * as api from '../api';
 
 const SINCE_PREFIX = 'inboxmax_since:';
-const MAX_STORED_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+// The server rejects cursors older than seven days; stay safely inside that.
+const MAX_CURSOR_AGE_MS = 7 * 24 * 60 * 60 * 1000 - 60 * 1000;
 
 function storageKey(accountKey) {
   return accountKey ? `${SINCE_PREFIX}${accountKey.trim().toLowerCase()}` : null;
+}
+
+function isUsableCursor(value, now = Date.now()) {
+  return Number.isFinite(value) && value > 0 && value <= now && value >= now - MAX_CURSOR_AGE_MS;
 }
 
 function readStoredSince(key) {
   if (!key) return undefined;
   try {
     const value = Number(sessionStorage.getItem(key));
-    const now = Date.now();
-    if (Number.isFinite(value) && value > 0 && value <= now && value >= now - MAX_STORED_WINDOW_MS) {
-      return value;
-    }
+    if (isUsableCursor(value)) return value;
     sessionStorage.removeItem(key);
   } catch {
     // Storage can be disabled; the in-memory cursor still works.
@@ -23,42 +25,58 @@ function readStoredSince(key) {
   return undefined;
 }
 
+/**
+ * Inbox state for one IMAP account: the email window, the "last seen"
+ * watermark, and search results (kept separate so searching never disturbs
+ * the inbox window or watermark).
+ *
+ * Emails with a UID above the watermark are unseen, meaning their headers
+ * have not been shown to the user yet; opening a message is not required.
+ */
 export function useEmails(accountKey) {
   const [emails, setEmails] = useState([]);
-  const [searchResults, setSearchResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
-  const [sinceTimestamp, setSinceTimestamp] = useState(null);
   const [lastOpen, setLastOpen] = useState(null);
   const [watermarkUid, setWatermarkUid] = useState(null);
+  const [searchResults, setSearchResults] = useState([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState(null);
 
   const emailsRef = useRef([]);
+  const watermarkRef = useRef(null);
+  // Set once the user positions the marker themselves; automatic "seen"
+  // updates then stay off for this page load so they cannot override it.
+  const manualWatermarkRef = useRef(false);
   const cursorRef = useRef({ accountKey: null, since: null });
   const watermarkQueueRef = useRef(Promise.resolve());
   const fetchRequestRef = useRef(0);
   const searchRequestRef = useRef(0);
 
-  const fetchEmails = useCallback(async (since, accountOverride) => {
+  const fetchEmails = useCallback(async () => {
+    if (!accountKey) return;
     const requestId = ++fetchRequestRef.current;
-    const scope = accountOverride;
-    const key = storageKey(scope);
-    if (cursorRef.current.accountKey !== scope) {
-      cursorRef.current = { accountKey: scope, since: null };
+    const key = storageKey(accountKey);
+    if (cursorRef.current.accountKey !== accountKey) {
+      cursorRef.current = { accountKey, since: null };
+      emailsRef.current = [];
+      manualWatermarkRef.current = false;
     }
-    const effectiveSince = since ?? cursorRef.current.since ?? readStoredSince(key);
+    const memorySince = cursorRef.current.since;
+    const effectiveSince = isUsableCursor(memorySince) ? memorySince : readStoredSince(key);
 
     const isRefresh = emailsRef.current.length > 0;
-    isRefresh ? setRefreshing(true) : setLoading(true);
+    if (isRefresh) setRefreshing(true);
+    else setLoading(true);
     setError(null);
     try {
       const data = await api.getEmails(effectiveSince);
       if (requestId !== fetchRequestRef.current) return;
       emailsRef.current = data.emails;
       setEmails(data.emails);
-      setSinceTimestamp(data.since_timestamp);
       setLastOpen(data.last_open);
-      cursorRef.current = { accountKey: scope, since: data.since_timestamp };
+      cursorRef.current = { accountKey, since: data.since_timestamp };
       if (key) {
         try {
           sessionStorage.setItem(key, String(data.since_timestamp));
@@ -66,47 +84,69 @@ export function useEmails(accountKey) {
           // Storage is an optional optimization.
         }
       }
-      setWatermarkUid(data.watermark_uid ?? null);
+      watermarkRef.current = data.watermark_uid ?? null;
+      setWatermarkUid(watermarkRef.current);
     } catch (caught) {
-      if (requestId === fetchRequestRef.current) setError(caught.message);
+      if (requestId === fetchRequestRef.current) setError(caught);
     } finally {
       if (requestId === fetchRequestRef.current) {
         setLoading(false);
         setRefreshing(false);
       }
     }
-  }, []);
+  }, [accountKey]);
 
-  const saveWatermark = useCallback((uid) => {
-    if (uid == null) return Promise.resolve();
+  const persistWatermark = useCallback((uid) => {
+    watermarkRef.current = uid;
     setWatermarkUid(uid);
     const save = watermarkQueueRef.current
       .catch(() => undefined)
       .then(() => api.setWatermark(uid));
     watermarkQueueRef.current = save;
     return save.catch((caught) => {
-      setError(`Could not save the last-seen marker: ${caught.message}`);
+      setError(new Error(`Could not save the last-seen marker: ${caught.message}`));
     });
   }, []);
 
+  /** The user placed the marker on `uid` (click or arrow keys). */
+  const setWatermarkManually = useCallback((uid) => {
+    if (uid == null) return Promise.resolve();
+    manualWatermarkRef.current = true;
+    return persistWatermark(uid);
+  }, [persistWatermark]);
+
+  /**
+   * Everything in the inbox has been shown, so move the marker to the newest
+   * UID. Never moves it backwards and never overrides a manual placement.
+   */
+  const markAllSeen = useCallback(() => {
+    if (manualWatermarkRef.current) return Promise.resolve();
+    const newest = emailsRef.current.reduce((max, email) => Math.max(max, email.uid), 0);
+    if (!newest || (watermarkRef.current != null && newest <= watermarkRef.current)) {
+      return Promise.resolve();
+    }
+    return persistWatermark(newest);
+  }, [persistWatermark]);
+
   const search = useCallback(async (query) => {
     const requestId = ++searchRequestRef.current;
-    setLoading(true);
-    setError(null);
+    setSearchLoading(true);
+    setSearchError(null);
     try {
       const results = await api.searchEmails(query);
       if (requestId === searchRequestRef.current) setSearchResults(results);
     } catch (caught) {
-      if (requestId === searchRequestRef.current) setError(caught.message);
+      if (requestId === searchRequestRef.current) setSearchError(caught);
     } finally {
-      if (requestId === searchRequestRef.current) setLoading(false);
+      if (requestId === searchRequestRef.current) setSearchLoading(false);
     }
   }, []);
 
   const clearSearch = useCallback(() => {
     searchRequestRef.current += 1;
     setSearchResults([]);
-    setLoading(false);
+    setSearchLoading(false);
+    setSearchError(null);
   }, []);
 
   const clearStoredSince = useCallback(() => {
@@ -123,15 +163,17 @@ export function useEmails(accountKey) {
 
   return {
     emails,
-    searchResults,
     loading,
     refreshing,
     error,
-    sinceTimestamp,
     lastOpen,
     watermarkUid,
-    saveWatermark,
     fetchEmails,
+    setWatermarkManually,
+    markAllSeen,
+    searchResults,
+    searchLoading,
+    searchError,
     search,
     clearSearch,
     clearStoredSince,

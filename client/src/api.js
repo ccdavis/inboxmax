@@ -1,5 +1,14 @@
 const BASE = '';
 
+/** A failed API call. `message` is the server's human-readable error. */
+export class ApiError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 async function request(path, options = {}) {
   const headers = { ...options.headers };
   if (options.body && !headers['Content-Type']) {
@@ -19,7 +28,7 @@ async function request(path, options = {}) {
     } catch {
       message = text || res.statusText;
     }
-    throw new Error(`${res.status}: ${message || 'Request failed'}`);
+    throw new ApiError(res.status, message || 'Request failed');
   }
   return res.json();
 }
@@ -58,7 +67,7 @@ export function getStatus() {
 
 // Emails
 export function getEmails(since) {
-  const params = since ? `?since=${since}` : '';
+  const params = since ? `?since=${encodeURIComponent(since)}` : '';
   return request(`/api/emails${params}`);
 }
 
