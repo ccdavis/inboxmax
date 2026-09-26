@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import * as api from '../api';
+import ComposeDialog from './ComposeDialog';
 import ConnectAccount from './ConnectAccount';
 import Layout from './Layout';
 import SidePanel from './SidePanel';
@@ -29,6 +30,9 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
   const [searchQuery, setSearchQuery] = useState(null);
   const [hideSeen, setHideSeen] = useState(false);
   const [notice, setNotice] = useState(null);
+  const [status, setStatus] = useState(null);
+  // The open compose dialog: { title, initial }, or null.
+  const [compose, setCompose] = useState(null);
 
   // Only a mailbox whose password is available can be read.
   const accountId = active?.connected ? active.id : null;
@@ -137,6 +141,20 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
     }
   };
 
+  const handleSent = (receipt, request) => {
+    setCompose(null);
+    const recipients = [...request.to, ...request.cc, ...request.bcc];
+    const first = recipients[0].name || recipients[0].email;
+    const who = recipients.length > 1 ? `${first} and ${recipients.length - 1} more` : first;
+    if (receipt.saved_to_sent) {
+      setNotice(null);
+      setStatus(`Message sent to ${who}.`);
+    } else {
+      setStatus(null);
+      setNotice(`Message sent to ${who}, but no copy could be saved in your Sent folder.`);
+    }
+  };
+
   const handleRemove = async (id) => {
     await removeAccount(id);
     if (id === active?.id) resetView();
@@ -217,13 +235,30 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
   }
 
   const listError = searchMode ? searchError : error;
+  const composeButton = (
+    <button
+      type="button"
+      onClick={() => {
+        setStatus(null);
+        setCompose({ title: 'New message', initial: {} });
+      }}
+      className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-500 px-3 py-1.5 text-sm font-medium text-white hover:from-indigo-600 hover:to-violet-600 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
+    >
+      <span aria-hidden="true">✎</span> Compose
+    </button>
+  );
   return (
+    <>
     <Layout
       email={active.email}
       onLogout={signOut}
       homeLink={!api.isDesktop}
       notice={notice}
       onDismissNotice={() => setNotice(null)}
+      status={status}
+      onDismissStatus={() => setStatus(null)}
+      actions={composeButton}
+      inert={compose != null}
       sidebar={
         <SidePanel
           accounts={{
@@ -266,5 +301,16 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
         />
       )}
     </Layout>
+    {compose && (
+      <ComposeDialog
+        from={active.email}
+        title={compose.title}
+        initial={compose.initial}
+        onSend={(request) => api.sendEmail(active.id, request)}
+        onSent={handleSent}
+        onClose={() => setCompose(null)}
+      />
+    )}
+    </>
   );
 }

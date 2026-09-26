@@ -74,6 +74,7 @@ pub fn run() {
             commands::list_emails,
             commands::get_email,
             commands::search_emails,
+            commands::send_email,
             commands::set_watermark,
             commands::list_remembered,
             commands::remember_email,

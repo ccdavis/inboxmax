@@ -2,7 +2,7 @@
 //! and the accounts whose passwords are available.
 
 use crate::credentials::CredentialStore;
-use inboxmax_core::account::{self, AccountRecord, AccountStatus};
+use inboxmax_core::account::{self, AccountStatus};
 use inboxmax_core::fake_mail::{DEMO_PASSWORD, is_demo_account};
 use inboxmax_core::imap_client::MailFetcher;
 use inboxmax_core::{AppError, AppResult, ConnectedAccount};
@@ -35,16 +35,6 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
     tokio::task::spawn_blocking(f)
         .await
         .expect("credential store task panicked")
-}
-
-fn connected_account(record: AccountRecord, password: String) -> ConnectedAccount {
-    ConnectedAccount {
-        imap_port: u16::try_from(record.imap_port).unwrap_or(993),
-        id: record.id,
-        email: record.email,
-        password,
-        imap_host: record.imap_host,
-    }
 }
 
 impl DesktopState {
@@ -106,10 +96,7 @@ impl DesktopState {
         {
             let mut connected = self.connected.write().await;
             for record in demo {
-                connected.insert(
-                    record.id.clone(),
-                    connected_account(record, DEMO_PASSWORD.into()),
-                );
+                connected.insert(record.id.clone(), record.connected(DEMO_PASSWORD.into()));
             }
         }
 
@@ -131,7 +118,7 @@ impl DesktopState {
         for (record, password) in records.into_iter().zip(passwords) {
             let Some(password) = password else { continue };
             saved_emails.insert(record.email.clone());
-            connected.insert(record.id.clone(), connected_account(record, password));
+            connected.insert(record.id.clone(), record.connected(password));
         }
         Ok(())
     }
@@ -282,7 +269,7 @@ mod tests {
                 email: email.into(),
                 password: "pw".into(),
                 imap_host: Some("imap.example.com".into()),
-                imap_port: None,
+                ..ConnectRequest::default()
             },
         )
         .await
@@ -353,7 +340,7 @@ mod tests {
                 email: DEMO_EMAIL.into(),
                 password: DEMO_PASSWORD.into(),
                 imap_host: Some(DEMO_HOST.into()),
-                imap_port: None,
+                ..ConnectRequest::default()
             },
         )
         .await

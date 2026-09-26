@@ -54,6 +54,7 @@ export const transport = {
   searchEmails: (accountId, query) =>
     request(`${account(accountId)}/search?q=${encodeURIComponent(query)}`),
   setWatermark: (accountId, uid) => request(`${account(accountId)}/watermark`, json('PUT', { uid })),
+  sendEmail: (accountId, message) => request(`${account(accountId)}/send`, json('POST', message)),
 
   getRemembered: (accountId) => request(`${account(accountId)}/remembered`),
   rememberEmail: (accountId, uid, data) => request(`${account(accountId)}/remembered/${uid}`, json('POST', data)),

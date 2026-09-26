@@ -14,6 +14,7 @@ vi.mock('./api', () => ({
   listAccounts: vi.fn(),
   connectAccount: vi.fn(),
   connectDemo: vi.fn(),
+  sendEmail: vi.fn(),
   removeAccount: vi.fn(),
   getEmails: vi.fn(),
   getRemembered: vi.fn(),
@@ -204,6 +205,54 @@ describe('inbox page', () => {
 
     expect(await screen.findByText('Home news')).toBeInTheDocument();
     expect(screen.queryByText(/Your mail connection ended/)).toBeNull();
+  });
+
+  describe('compose', () => {
+    async function composeTo(address) {
+      renderInbox();
+      await screen.findByText('Thirty');
+      fireEvent.click(screen.getByRole('button', { name: /Compose/ }));
+      const dialog = screen.getByRole('dialog', { name: 'New message' });
+      fireEvent.change(within(dialog).getByLabelText('To'), { target: { value: address } });
+      fireEvent.change(within(dialog).getByLabelText('Subject'), { target: { value: 'Hello' } });
+      return dialog;
+    }
+
+    it('sends from the open mailbox and says so', async () => {
+      api.sendEmail.mockResolvedValue({ message_id: 'm@x', saved_to_sent: true });
+      const dialog = await composeTo('Sarah <sarah@acme.example>');
+      expect(dialog).toHaveTextContent('work@example.com');
+      // Nothing behind the dialog can be used while it is open.
+      expect(screen.getByRole('banner', { hidden: true }).closest('[inert]')).not.toBeNull();
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Send' }));
+
+      expect(await screen.findByRole('status')).toHaveTextContent('Message sent to Sarah.');
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(api.sendEmail).toHaveBeenCalledWith('work', expect.objectContaining({
+        to: [{ name: 'Sarah', email: 'sarah@acme.example' }],
+        subject: 'Hello',
+      }));
+      expect(document.querySelector('[inert]')).toBeNull();
+    });
+
+    it('warns when no copy could be filed in Sent', async () => {
+      api.sendEmail.mockResolvedValue({ message_id: 'm@x', saved_to_sent: false });
+      const dialog = await composeTo('a@x.example, b@x.example');
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Send' }));
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'Message sent to a@x.example and 1 more, but no copy could be saved in your Sent folder.',
+      );
+      expect(screen.queryByRole('status')).toBeNull();
+    });
+
+    it('keeps the draft open when sending fails', async () => {
+      api.sendEmail.mockRejectedValue(new Error('Mail server error: Sending failed: timed out'));
+      const dialog = await composeTo('a@x.example');
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Send' }));
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent('timed out');
+      expect(within(dialog).getByLabelText('Subject')).toHaveValue('Hello');
+    });
   });
 
   it('starts at the connect screen when there are no mailboxes', async () => {

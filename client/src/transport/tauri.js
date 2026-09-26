@@ -35,6 +35,7 @@ export const transport = {
   getEmail: (accountId, uid) => call('get_email', { accountId, uid }),
   searchEmails: (accountId, query) => call('search_emails', { accountId, query }),
   setWatermark: (accountId, uid) => call('set_watermark', { accountId, uid }),
+  sendEmail: (accountId, request) => call('send_email', { accountId, request }),
 
   getRemembered: (accountId) => call('list_remembered', { accountId }),
   rememberEmail: (accountId, uid, data) => call('remember_email', { accountId, uid, data }),

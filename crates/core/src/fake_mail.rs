@@ -6,11 +6,14 @@
 use crate::error::{AppError, AppResult};
 use crate::imap_client::{
     EmailEnvelope, FullEmail, MailAddress, MailCredentials, MailFetcher, MailboxSnapshot,
+    SmtpServer,
 };
 use crate::mailbox::{self, RememberRequest};
+use crate::outgoing::{OutgoingEmail, SendReceipt};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
+use serde::Serialize;
 use sqlx::SqlitePool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// The demo account, which people can open to try the app without a mail
 /// account. `.invalid` names are reserved (RFC 2606), so no real mailbox or
@@ -279,6 +282,49 @@ impl MailFetcher for WithDemoMailbox {
     async fn verify_credentials(&self, credentials: &MailCredentials) -> AppResult<()> {
         self.pick(credentials).verify_credentials(credentials).await
     }
+
+    async fn send(
+        &self,
+        credentials: &MailCredentials,
+        smtp: &SmtpServer,
+        email: &OutgoingEmail,
+    ) -> AppResult<SendReceipt> {
+        self.pick(credentials).send(credentials, smtp, email).await
+    }
+}
+
+/// Mail to this address is refused, as a real server refuses an unknown mailbox.
+pub const REFUSED_RECIPIENT: &str = "nobody@refused.invalid";
+/// The outbox keeps only the most recent messages.
+const OUTBOX_LIMIT: usize = 200;
+
+/// A message the fake mailbox "sent": what the user asked for, and the
+/// message exactly as it would have gone to the SMTP server.
+#[derive(Debug, Clone, Serialize)]
+pub struct SentMessage {
+    /// The sending account's address.
+    pub account: String,
+    pub message_id: String,
+    pub to: Vec<MailAddress>,
+    pub cc: Vec<MailAddress>,
+    pub bcc: Vec<MailAddress>,
+    pub subject: String,
+    pub body: String,
+    /// The formatted message as sent (without a Bcc header).
+    pub raw: String,
+}
+
+static OUTBOX: Mutex<Vec<SentMessage>> = Mutex::new(Vec::new());
+
+/// Messages sent from `account` through the fake mailbox, oldest first.
+pub fn sent_messages(account: &str) -> Vec<SentMessage> {
+    OUTBOX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .filter(|sent| sent.account.eq_ignore_ascii_case(account))
+        .cloned()
+        .collect()
 }
 
 #[async_trait::async_trait]
@@ -349,6 +395,44 @@ impl MailFetcher for FakeMailFetcher {
             ));
         }
         Ok(())
+    }
+
+    async fn send(
+        &self,
+        credentials: &MailCredentials,
+        _smtp: &SmtpServer,
+        email: &OutgoingEmail,
+    ) -> AppResult<SendReceipt> {
+        if let Some(refused) = email
+            .recipients()
+            .find(|r| r.email.eq_ignore_ascii_case(REFUSED_RECIPIENT))
+        {
+            return Err(AppError::BadRequest(format!(
+                "The mail server refused the message: 550 5.1.1 <{}>: mailbox unavailable",
+                refused.email
+            )));
+        }
+        let raw = String::from_utf8_lossy(&email.message(false)?.formatted()).into_owned();
+        let mut outbox = OUTBOX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if outbox.len() >= OUTBOX_LIMIT {
+            outbox.remove(0);
+        }
+        outbox.push(SentMessage {
+            account: credentials.email.clone(),
+            message_id: email.message_id.clone(),
+            to: email.to.clone(),
+            cc: email.cc.clone(),
+            bcc: email.bcc.clone(),
+            subject: email.subject.clone(),
+            body: email.body.clone(),
+            raw,
+        });
+        Ok(SendReceipt {
+            message_id: email.message_id.clone(),
+            saved_to_sent: true,
+        })
     }
 }
 
@@ -423,6 +507,93 @@ mod tests {
         );
     }
 
+    fn connected(email: &str) -> crate::ConnectedAccount {
+        crate::ConnectedAccount {
+            id: "a".into(),
+            email: email.into(),
+            password: "pw".into(),
+            imap_host: "imap.example.com".into(),
+            imap_port: 993,
+            smtp: SmtpServer {
+                host: "smtp.example.com".into(),
+                port: 587,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn sending_records_the_message_as_it_would_go_out() {
+        let account = connected("outbox-test@example.com");
+        let receipt = mailbox::send(
+            &FakeMailFetcher,
+            &account,
+            crate::outgoing::SendRequest {
+                to: vec![MailAddress::new(
+                    Some("Sarah Chen"),
+                    "sarah.chen@acme.example",
+                )],
+                bcc: vec![MailAddress::new(None, "hidden@example.com")],
+                subject: "Hello".into(),
+                body: "Hi Sarah".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(receipt.saved_to_sent);
+
+        let sent = sent_messages("OUTBOX-TEST@example.com");
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].message_id, receipt.message_id);
+        assert_eq!(sent[0].bcc[0].email, "hidden@example.com");
+        assert!(sent[0].raw.contains("From: outbox-test@example.com\r\n"));
+        assert!(
+            sent[0]
+                .raw
+                .contains("To: \"Sarah Chen\" <sarah.chen@acme.example>")
+        );
+        assert!(
+            !sent[0].raw.contains("hidden@example.com"),
+            "Bcc stays off the wire"
+        );
+        assert!(sent_messages("someone-else@example.com").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_refused_recipient_fails_the_send_and_nothing_is_recorded() {
+        let account = connected("refused-test@example.com");
+        let error = mailbox::send(
+            &FakeMailFetcher,
+            &account,
+            crate::outgoing::SendRequest {
+                to: vec![
+                    MailAddress::new(None, "fine@example.com"),
+                    MailAddress::new(None, REFUSED_RECIPIENT),
+                ],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("refused"));
+        assert!(sent_messages("refused-test@example.com").is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_only_mail_clients_refuse_to_send() {
+        let error = mailbox::send(
+            &Unreachable,
+            &connected("x@example.com"),
+            crate::outgoing::SendRequest {
+                to: vec![MailAddress::new(None, "y@example.com")],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "Sending mail is not available");
+    }
+
     /// Stands in for real IMAP: every call fails.
     struct Unreachable;
 
@@ -495,7 +666,7 @@ mod tests {
                 email: DEMO_EMAIL.into(),
                 password: DEMO_PASSWORD.into(),
                 imap_host: Some(DEMO_HOST.into()),
-                imap_port: None,
+                ..Default::default()
             },
         )
         .await

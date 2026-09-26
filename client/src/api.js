@@ -28,6 +28,11 @@ export const getEmails = (accountId, since) => transport.getEmails(accountId, si
 export const getEmail = (accountId, uid) => transport.getEmail(accountId, uid);
 export const searchEmails = (accountId, query) => transport.searchEmails(accountId, query);
 export const setWatermark = (accountId, uid) => transport.setWatermark(accountId, uid);
+/**
+ * `request`: { to, cc, bcc: [{ name, email }], subject, body, in_reply_to, references }.
+ * Resolves to { message_id, saved_to_sent }.
+ */
+export const sendEmail = (accountId, request) => transport.sendEmail(accountId, request);
 export const getRemembered = (accountId) => transport.getRemembered(accountId);
 export const rememberEmail = (accountId, uid, data) => transport.rememberEmail(accountId, uid, data);
 export const forgetEmail = (accountId, uid) => transport.forgetEmail(accountId, uid);

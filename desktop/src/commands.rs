@@ -7,6 +7,7 @@ use inboxmax_core::account::{self, AccountStatus, ConnectRequest, ConnectRespons
 use inboxmax_core::fake_mail::{self, DEMO_EMAIL, DEMO_HOST, DEMO_PASSWORD};
 use inboxmax_core::imap_client::{EmailEnvelope, FullEmail};
 use inboxmax_core::mailbox::{self, EmailListResponse, RememberRequest, RememberedEmail};
+use inboxmax_core::outgoing::{SendReceipt, SendRequest};
 use inboxmax_core::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -21,10 +22,9 @@ pub struct AppInfo {
 
 #[derive(Deserialize)]
 pub struct ConnectArgs {
-    pub email: String,
-    pub password: String,
-    pub imap_host: Option<String>,
-    pub imap_port: Option<u16>,
+    /// The same fields as the web API's connect request.
+    #[serde(flatten)]
+    pub connection: ConnectRequest,
     /// Save the password in the OS credential store.
     #[serde(default = "default_true")]
     pub remember: bool,
@@ -63,10 +63,12 @@ pub async fn connect_demo(state: State<'_, DesktopState>) -> AppResult<ConnectRe
     let response = connect(
         &state,
         ConnectArgs {
-            email: DEMO_EMAIL.into(),
-            password: DEMO_PASSWORD.into(),
-            imap_host: Some(DEMO_HOST.into()),
-            imap_port: None,
+            connection: ConnectRequest {
+                email: DEMO_EMAIL.into(),
+                password: DEMO_PASSWORD.into(),
+                imap_host: Some(DEMO_HOST.into()),
+                ..ConnectRequest::default()
+            },
             remember: false,
         },
     )
@@ -76,17 +78,11 @@ pub async fn connect_demo(state: State<'_, DesktopState>) -> AppResult<ConnectRe
 }
 
 async fn connect(state: &DesktopState, request: ConnectArgs) -> AppResult<ConnectResponse> {
-    let remember = request.remember;
     let outcome = account::connect_account(
         &state.db,
         state.mail.as_ref(),
         LOCAL_USER_ID,
-        ConnectRequest {
-            email: request.email,
-            password: request.password,
-            imap_host: request.imap_host,
-            imap_port: request.imap_port,
-        },
+        request.connection,
     )
     .await?;
     let status = AccountStatus {
@@ -95,7 +91,7 @@ async fn connect(state: &DesktopState, request: ConnectArgs) -> AppResult<Connec
         connected: true,
         password_saved: false,
     };
-    let password_saved = state.add_connected(outcome.account, remember).await;
+    let password_saved = state.add_connected(outcome.account, request.remember).await;
     Ok(ConnectResponse {
         account: AccountStatus {
             password_saved,
@@ -138,6 +134,16 @@ pub async fn search_emails(
 ) -> AppResult<Vec<EmailEnvelope>> {
     let account = state.require_account(&account_id).await?;
     mailbox::search(state.mail.as_ref(), &account, &query).await
+}
+
+#[tauri::command]
+pub async fn send_email(
+    state: State<'_, DesktopState>,
+    account_id: String,
+    request: SendRequest,
+) -> AppResult<SendReceipt> {
+    let account = state.require_account(&account_id).await?;
+    mailbox::send(state.mail.as_ref(), &account, request).await
 }
 
 #[tauri::command]

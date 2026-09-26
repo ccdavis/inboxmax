@@ -4,7 +4,8 @@
 
 use crate::account::ConnectedAccount;
 use crate::error::{AppError, AppResult};
-use crate::imap_client::{EmailEnvelope, FullEmail, MailFetcher};
+use crate::imap_client::{EmailEnvelope, FullEmail, MailAddress, MailFetcher};
+use crate::outgoing::{OutgoingEmail, SendReceipt, SendRequest};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -181,6 +182,17 @@ pub async fn set_watermark(db: &SqlitePool, account: &ConnectedAccount, uid: i64
         .execute(db)
         .await?;
     Ok(())
+}
+
+/// Send a message from the account and file a copy in its Sent folder.
+pub async fn send(
+    mail: &dyn MailFetcher,
+    account: &ConnectedAccount,
+    request: SendRequest,
+) -> AppResult<SendReceipt> {
+    let email = OutgoingEmail::new(MailAddress::new(None, &account.email), request)?;
+    mail.send(&account.mail_credentials(), &account.smtp, &email)
+        .await
 }
 
 /// Search subjects and senders; returns the newest 50 matches.

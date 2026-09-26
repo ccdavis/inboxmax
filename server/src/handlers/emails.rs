@@ -6,6 +6,7 @@ use axum::extract::{Path, Query, State};
 use axum_extra::extract::CookieJar;
 use inboxmax_core::imap_client::{EmailEnvelope, FullEmail};
 use inboxmax_core::mailbox::{self, EmailListResponse};
+use inboxmax_core::outgoing::{SendReceipt, SendRequest};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -58,6 +59,19 @@ pub async fn set_watermark(
     let account = require_account(&state, &jar, &account_id).await?;
     mailbox::set_watermark(&state.db, &account, req.uid).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// POST /api/accounts/{account_id}/send
+pub async fn send_email(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(account_id): Path<String>,
+    Json(request): Json<SendRequest>,
+) -> AppResult<Json<SendReceipt>> {
+    let account = require_account(&state, &jar, &account_id).await?;
+    Ok(Json(
+        mailbox::send(state.mail.as_ref(), &account, request).await?,
+    ))
 }
 
 /// GET /api/accounts/{account_id}/search?q=

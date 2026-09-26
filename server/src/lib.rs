@@ -26,7 +26,7 @@ pub fn api_router(state: AppState) -> axum::Router {
     use axum::routing::{get, post, put};
     use handlers::{accounts, auth, emails, remembered};
 
-    axum::Router::new()
+    let router = axum::Router::new()
         .route("/api/register", post(auth::register))
         .route("/api/signin", post(auth::signin))
         .route("/api/signout", post(auth::signout))
@@ -52,6 +52,7 @@ pub fn api_router(state: AppState) -> axum::Router {
             "/api/accounts/{account_id}/search",
             get(emails::search_emails),
         )
+        .route("/api/accounts/{account_id}/send", post(emails::send_email))
         .route(
             "/api/accounts/{account_id}/watermark",
             put(emails::set_watermark),
@@ -63,6 +64,9 @@ pub fn api_router(state: AppState) -> axum::Router {
         .route(
             "/api/accounts/{account_id}/remembered/{uid}",
             post(remembered::remember_email).delete(remembered::forget_email),
-        )
-        .with_state(state)
+        );
+    // End-to-end tests read what the fake mailbox "sent".
+    #[cfg(feature = "fake-mail")]
+    let router = router.route("/api/test/outbox", get(handlers::test_support::outbox));
+    router.with_state(state)
 }

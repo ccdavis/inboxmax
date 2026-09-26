@@ -1,4 +1,6 @@
+use crate::config::server_files_sent_mail;
 use crate::error::{AppError, AppResult};
+use crate::outgoing::{OutgoingEmail, SendReceipt};
 use async_imap::types::Fetch;
 use async_native_tls::TlsConnector;
 use chrono::{DateTime, NaiveDate, Utc};
@@ -25,15 +27,35 @@ pub struct MailCredentials {
     pub password: String,
 }
 
+/// Where an account submits outgoing mail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmtpServer {
+    pub host: String,
+    pub port: u16,
+}
+
 #[derive(Debug, Clone)]
 pub struct MailboxSnapshot {
     pub envelopes: Vec<EmailEnvelope>,
     pub uid_validity: Option<u32>,
 }
 
-/// Abstraction over IMAP operations so handlers can be tested without a real server.
+/// Abstraction over the mail servers (IMAP for reading, SMTP for sending) so
+/// handlers can be tested without real ones.
 #[async_trait::async_trait]
 pub trait MailFetcher: Send + Sync {
+    /// Send a message and file a copy in the account's Sent folder. Mail
+    /// clients that only read (as many test doubles do) refuse.
+    async fn send(
+        &self,
+        credentials: &MailCredentials,
+        smtp: &SmtpServer,
+        email: &OutgoingEmail,
+    ) -> AppResult<SendReceipt> {
+        let _ = (credentials, smtp, email);
+        Err(AppError::BadRequest("Sending mail is not available".into()))
+    }
+
     async fn fetch_envelopes(
         &self,
         credentials: &MailCredentials,
@@ -102,6 +124,99 @@ impl MailFetcher for RealMailFetcher {
         })
         .await
     }
+
+    async fn send(
+        &self,
+        credentials: &MailCredentials,
+        smtp: &SmtpServer,
+        email: &OutgoingEmail,
+    ) -> AppResult<SendReceipt> {
+        crate::smtp::send(credentials, smtp, email.message(false)?).await?;
+        // The message is sent; failing to file a copy must not look like a
+        // failed send (a retry would send it twice), so it only reports back.
+        let saved_to_sent = if server_files_sent_mail(&smtp.host) {
+            true
+        } else {
+            let copy = email.message(true)?.formatted();
+            let filed = run_with_timeout(async {
+                let mut session = connect(credentials).await?;
+                let filed = file_in_sent(&mut session, &copy, &email.message_id).await;
+                let _ = session.logout().await;
+                filed
+            })
+            .await;
+            filed.unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Sent, but could not file a copy for {}: {e}",
+                    credentials.email
+                );
+                false
+            })
+        };
+        Ok(SendReceipt {
+            message_id: email.message_id.clone(),
+            saved_to_sent,
+        })
+    }
+}
+
+/// Names servers commonly give the Sent folder when they do not mark it with
+/// the \Sent special-use attribute.
+const SENT_FOLDER_NAMES: &[&str] = &[
+    "Sent",
+    "Sent Items",
+    "Sent Messages",
+    "Sent Mail",
+    "INBOX.Sent",
+];
+
+/// Append `raw` to the Sent folder, unless a message with this Message-ID is
+/// already there. Returns false when there is no Sent folder.
+async fn file_in_sent(session: &mut ImapSession, raw: &[u8], message_id: &str) -> AppResult<bool> {
+    let names: Vec<_> = session
+        .list(Some(""), Some("*"))
+        .await
+        .map_err(|e| AppError::Imap(format!("LIST failed: {e}")))?
+        .try_collect()
+        .await
+        .map_err(|e| AppError::Imap(format!("LIST failed: {e}")))?;
+    let special_use = names.iter().find(|name| {
+        name.attributes()
+            .iter()
+            .any(|attribute| matches!(attribute, imap_proto::types::NameAttribute::Sent))
+    });
+    let by_name = || {
+        SENT_FOLDER_NAMES.iter().find_map(|candidate| {
+            names
+                .iter()
+                .find(|name| name.name().eq_ignore_ascii_case(candidate))
+        })
+    };
+    let Some(folder) = special_use
+        .or_else(by_name)
+        .map(|name| name.name().to_string())
+    else {
+        return Ok(false);
+    };
+
+    session
+        .select(&folder)
+        .await
+        .map_err(|e| AppError::Imap(format!("SELECT {folder} failed: {e}")))?;
+    let already_filed = session
+        .uid_search(format!(
+            "HEADER Message-ID \"{}\"",
+            sanitize_imap_query(message_id)
+        ))
+        .await
+        .map_err(|e| AppError::Imap(format!("SEARCH failed: {e}")))?;
+    if already_filed.is_empty() {
+        session
+            .append(&folder, Some("(\\Seen)"), None, raw)
+            .await
+            .map_err(|e| AppError::Imap(format!("APPEND to {folder} failed: {e}")))?;
+    }
+    Ok(true)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -372,9 +487,11 @@ fn parse_envelope(msg: &Fetch) -> Option<EmailEnvelope> {
     })
 }
 
-async fn resolve_public_address(host: &str, port: u16) -> AppResult<SocketAddr> {
+/// Resolve a mail server's host name, accepting only public addresses so
+/// neither IMAP nor SMTP can be aimed at the local network.
+pub(crate) async fn resolve_public_address(host: &str, port: u16) -> AppResult<SocketAddr> {
     if host.is_empty() || host.len() > 253 || host.contains(['\0', '/', '\\']) {
-        return Err(AppError::BadRequest("Invalid IMAP host".into()));
+        return Err(AppError::BadRequest("Invalid mail server host".into()));
     }
 
     let addresses = timeout(CONNECT_TIMEOUT, tokio::net::lookup_host((host, port)))
@@ -385,7 +502,9 @@ async fn resolve_public_address(host: &str, port: u16) -> AppResult<SocketAddr> 
     addresses
         .into_iter()
         .find(|address| is_public_ip(address.ip()))
-        .ok_or_else(|| AppError::BadRequest("IMAP host must resolve to a public address".into()))
+        .ok_or_else(|| {
+            AppError::BadRequest("Mail server host must resolve to a public address".into())
+        })
 }
 
 fn is_public_ip(ip: IpAddr) -> bool {

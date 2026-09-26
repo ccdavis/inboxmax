@@ -10,6 +10,8 @@ pub mod error;
 pub mod fake_mail;
 pub mod imap_client;
 pub mod mailbox;
+pub mod outgoing;
+mod smtp;
 
 pub use account::ConnectedAccount;
 pub use error::{AppError, AppResult};

@@ -4,9 +4,11 @@ use axum::http::{Request, StatusCode};
 use chrono::{NaiveDate, Utc};
 use http_body_util::BodyExt;
 use inboxmax_core::ConnectedAccount;
+use inboxmax_core::outgoing::{OutgoingEmail, SendReceipt};
 use inboxmax_server::error::{AppError, AppResult};
 use inboxmax_server::imap_client::{
     EmailEnvelope, FullEmail, MailAddress, MailCredentials, MailFetcher, MailboxSnapshot,
+    SmtpServer,
 };
 use inboxmax_server::rate_limit::AttemptLimiter;
 use inboxmax_server::session::SessionStore;
@@ -14,6 +16,7 @@ use inboxmax_server::{AppState, api_router};
 use serde_json::Value;
 use sqlx::SqlitePool;
 use std::sync::Arc;
+use std::sync::Mutex;
 use tower::ServiceExt;
 
 // ---------------------------------------------------------------------------
@@ -25,16 +28,37 @@ const MISSING_UID: u32 = 404;
 
 struct MockMailFetcher {
     envelopes: Vec<EmailEnvelope>,
+    /// What was sent, and through which SMTP server.
+    sent: Mutex<Vec<(SmtpServer, OutgoingEmail)>>,
 }
 
 impl MockMailFetcher {
     fn with_envelopes(envelopes: Vec<EmailEnvelope>) -> Self {
-        Self { envelopes }
+        Self {
+            envelopes,
+            sent: Mutex::new(Vec::new()),
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl MailFetcher for MockMailFetcher {
+    async fn send(
+        &self,
+        _credentials: &MailCredentials,
+        smtp: &SmtpServer,
+        email: &OutgoingEmail,
+    ) -> AppResult<SendReceipt> {
+        self.sent
+            .lock()
+            .unwrap()
+            .push((smtp.clone(), email.clone()));
+        Ok(SendReceipt {
+            message_id: email.message_id.clone(),
+            saved_to_sent: false,
+        })
+    }
+
     async fn fetch_envelopes(
         &self,
         _credentials: &MailCredentials,
@@ -124,6 +148,10 @@ fn build_app(state: AppState) -> Router {
 }
 
 async fn build_state(envelopes: Vec<EmailEnvelope>) -> AppState {
+    build_state_with(Arc::new(MockMailFetcher::with_envelopes(envelopes))).await
+}
+
+async fn build_state_with(mail: Arc<MockMailFetcher>) -> AppState {
     let pool = setup_test_db().await;
     seed_account(&pool).await;
     let sessions = SessionStore::new();
@@ -136,15 +164,30 @@ async fn build_state(envelopes: Vec<EmailEnvelope>) -> AppState {
                 password: "pass".into(),
                 imap_host: "imap.test.com".into(),
                 imap_port: 993,
+                smtp: SmtpServer {
+                    host: "smtp.test.com".into(),
+                    port: 587,
+                },
             },
         )
         .await;
     AppState {
         db: pool,
         sessions,
-        mail: Arc::new(MockMailFetcher::with_envelopes(envelopes)),
+        mail,
         limiter: AttemptLimiter::new(),
     }
+}
+
+fn send_request(body: Value, signed_in: bool) -> Request<Body> {
+    let mut request = Request::builder()
+        .uri(format!("/api/accounts/{ACCOUNT_ID}/send"))
+        .method("POST")
+        .header("Content-Type", "application/json");
+    if signed_in {
+        request = request.header("Cookie", format!("inboxmax_session={SESSION_TOKEN}"));
+    }
+    request.body(Body::from(body.to_string())).unwrap()
 }
 
 fn emails_request(uri: &str) -> Request<Body> {
@@ -529,4 +572,78 @@ async fn missing_message_returns_not_found() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests: sending
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sending_goes_through_the_accounts_smtp_server() {
+    let mail = Arc::new(MockMailFetcher::with_envelopes(vec![]));
+    let state = build_state_with(mail.clone()).await;
+    let response = build_app(state)
+        .oneshot(send_request(
+            serde_json::json!({
+                "to": [{ "name": "Sarah Chen", "email": "sarah@acme.example" }],
+                "cc": [{ "name": null, "email": "bob@acme.example" }],
+                "subject": "Hello",
+                "body": "Hi Sarah",
+                "in_reply_to": "<orig@acme.example>",
+            }),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let receipt = parse_response(response).await;
+
+    let sent = mail.sent.lock().unwrap();
+    let (smtp, email) = &sent[0];
+    assert_eq!(smtp.host, "smtp.test.com");
+    assert_eq!(email.from.email, "test@example.com");
+    assert_eq!(email.to[0].name.as_deref(), Some("Sarah Chen"));
+    assert_eq!(email.cc[0].email, "bob@acme.example");
+    assert_eq!(email.in_reply_to.as_deref(), Some("orig@acme.example"));
+    assert_eq!(receipt["message_id"], email.message_id.as_str());
+    assert_eq!(receipt["saved_to_sent"], false);
+}
+
+#[tokio::test]
+async fn sending_explains_what_is_wrong_with_a_message() {
+    let mail = Arc::new(MockMailFetcher::with_envelopes(vec![]));
+    let state = build_state_with(mail.clone()).await;
+    for (body, message) in [
+        (
+            serde_json::json!({ "subject": "No one" }),
+            "Add at least one recipient",
+        ),
+        (
+            serde_json::json!({ "to": [{ "name": null, "email": "not-an-address" }] }),
+            "“not-an-address” is not a valid email address",
+        ),
+    ] {
+        let response = build_app(state.clone())
+            .oneshot(send_request(body, true))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(parse_response(response).await["error"], message);
+    }
+    assert!(mail.sent.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn sending_requires_a_signed_in_session() {
+    let mail = Arc::new(MockMailFetcher::with_envelopes(vec![]));
+    let state = build_state_with(mail.clone()).await;
+    let response = build_app(state)
+        .oneshot(send_request(
+            serde_json::json!({ "to": [{ "name": null, "email": "a@example.com" }] }),
+            false,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(mail.sent.lock().unwrap().is_empty());
 }

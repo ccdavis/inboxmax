@@ -269,6 +269,10 @@ mod tests {
             password: "secret".into(),
             imap_host: "imap.example.com".into(),
             imap_port: 993,
+            smtp: inboxmax_core::imap_client::SmtpServer {
+                host: "smtp.example.com".into(),
+                port: 587,
+            },
         }
     }
 
