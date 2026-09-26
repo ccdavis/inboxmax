@@ -1,0 +1,39 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Inbox Max",
+  "identifier": "app.inboxmax.desktop",
+  "build": {
+    "beforeDevCommand": "npm --prefix ../client run dev:desktop",
+    "devUrl": "http://localhost:5174",
+    "beforeBuildCommand": "npm --prefix ../client run build:desktop",
+    "frontendDist": "../client/dist-desktop"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Inbox Max",
+        "width": 1100,
+        "height": 760,
+        "minWidth": 360,
+        "minHeight": 480
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self'; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Productivity",
+    "shortDescription": "The email client for people who read subject lines.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

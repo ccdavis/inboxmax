@@ -1,0 +1,36 @@
+[package]
+name = "inboxmax-desktop"
+description = "Inbox Max desktop app (Tauri): a local profile over the shared mailbox core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "inboxmax_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+# Serve the generated demo mailbox when INBOXMAX_FAKE_MAIL=1 (development and tests).
+fake-mail = ["inboxmax-core/fake-mail"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+inboxmax-core.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+keyring = "4"
+
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+chrono.workspace = true
