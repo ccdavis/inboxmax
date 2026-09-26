@@ -263,7 +263,11 @@ pub struct FullEmail {
     pub received: Option<DateTime<Utc>>,
     pub body_html: Option<String>,
     pub body_text: Option<String>,
+    /// Without angle brackets, like `references`.
     pub message_id: Option<String>,
+    /// The thread this message continues (its References header), oldest
+    /// first, so a reply can extend it.
+    pub references: Vec<String>,
 }
 
 /// Bound an entire mail operation (connect, login, and commands) by one deadline.
@@ -412,6 +416,13 @@ pub fn parse_message(
         body_html: parsed.body_html(0).map(|s| s.to_string()),
         body_text: parsed.body_text(0).map(|s| s.to_string()),
         message_id: parsed.message_id().map(|s| s.to_string()),
+        references: match parsed.references() {
+            mail_parser::HeaderValue::Text(id) => vec![id.to_string()],
+            mail_parser::HeaderValue::TextList(ids) => {
+                ids.iter().map(|id| id.to_string()).collect()
+            }
+            _ => Vec::new(),
+        },
     })
 }
 
@@ -747,6 +758,7 @@ mod tests {
             "Subject: Quarterly numbers\r\n",
             "Date: Fri, 25 Sep 2026 09:00:00 -0400\r\n",
             "Message-ID: <abc@work.example>\r\n",
+            "References: <root@work.example>\r\n <prev@work.example>\r\n",
             "\r\n",
             "Hello\r\n",
         );
@@ -780,6 +792,7 @@ mod tests {
         assert_eq!(email.received, Some(received));
         assert_eq!(email.subject, "Quarterly numbers");
         assert_eq!(email.message_id.as_deref(), Some("abc@work.example"));
+        assert_eq!(email.references, ["root@work.example", "prev@work.example"]);
         assert_eq!(email.body_text.as_deref().map(str::trim), Some("Hello"));
     }
 
@@ -789,6 +802,7 @@ mod tests {
         let email = parse_message(1, raw.as_bytes(), None).unwrap();
         assert_eq!(email.from, [addr(None, "solo@example.com")]);
         assert!(email.to.is_empty() && email.cc.is_empty() && email.reply_to.is_empty());
+        assert!(email.references.is_empty() && email.message_id.is_none());
         assert_eq!((email.date, email.received), (None, None));
         assert_eq!(email.subject, "");
     }

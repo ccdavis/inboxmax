@@ -282,6 +282,8 @@ describe('desktop app', () => {
       received: now,
       body_html: '<p>See <a href="https://example.com/">the site</a></p>',
       body_text: null,
+      message_id: 'thirty@example.com',
+      references: [],
     });
     api.openExternal.mockResolvedValue(undefined);
   });
@@ -336,6 +338,39 @@ describe('desktop app', () => {
 
     await vi.waitFor(() => expect(api.getEmails.mock.calls.length).toBeGreaterThan(emailLoads));
     expect(api.getRemembered.mock.calls.length).toBeGreaterThan(rememberedLoads);
+  });
+
+  it('replies from the reader, threaded and quoted', async () => {
+    api.sendEmail.mockResolvedValue({ message_id: 'r@x', saved_to_sent: true });
+    render(<DesktopApp />);
+    fireEvent.click(await screen.findByText('Thirty'));
+    await screen.findByRole('heading', { name: 'Thirty', level: 1 });
+    // Sent only to this mailbox, so there is no one else to reply to.
+    expect(screen.queryByRole('button', { name: 'Reply all' })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reply' }));
+    const dialog = screen.getByRole('dialog', { name: 'Reply' });
+    expect(within(dialog).getByRole('list', { name: 'To recipients' })).toHaveTextContent('B <b@example.com>');
+    expect(within(dialog).getByLabelText('Subject')).toHaveValue('Re: Thirty');
+    expect(within(dialog).getByLabelText('Message')).toHaveFocus();
+    expect(within(dialog).getByLabelText('Message').value).toContain('> See the site (https://example.com/)');
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Send' }));
+    await screen.findByRole('status');
+    expect(api.sendEmail).toHaveBeenCalledWith('work', expect.objectContaining({
+      in_reply_to: 'thirty@example.com',
+      references: ['thirty@example.com'],
+    }));
+  });
+
+  it('forwards from the reader with an empty To', async () => {
+    render(<DesktopApp />);
+    fireEvent.click(await screen.findByText('Thirty'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Forward' }));
+    const dialog = screen.getByRole('dialog', { name: 'Forward' });
+    expect(within(dialog).getByLabelText('To')).toHaveFocus();
+    expect(within(dialog).getByLabelText('Subject')).toHaveValue('Fwd: Thirty');
+    expect(within(dialog).getByLabelText('Message').value).toContain('From: B <b@example.com>');
   });
 
   it('opens email links in the system browser', async () => {

@@ -10,6 +10,7 @@ import Spinner from './Spinner';
 import { useAccounts } from '../hooks/useAccounts';
 import { useEmails } from '../hooks/useEmails';
 import { useRemembered } from '../hooks/useRemembered';
+import { forwardDraft, replyDraft } from '../utils/replies';
 
 const POLL_INTERVAL_MS = 2 * 60 * 1000;
 
@@ -138,6 +139,18 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
     if (result.account.id === wasShowing) {
       reload();
       fetchRemembered();
+    }
+  };
+
+  const handleReply = (kind, email) => {
+    setStatus(null);
+    if (kind === 'forward') {
+      setCompose({ title: 'Forward', initial: forwardDraft(email) });
+    } else {
+      setCompose({
+        title: kind === 'all' ? 'Reply all' : 'Reply',
+        initial: replyDraft(email, { me: active.email, all: kind === 'all' }),
+      });
     }
   };
 
@@ -280,7 +293,13 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
       }
     >
       {selectedUid ? (
-        <EmailReader accountId={active.id} emailUid={selectedUid} onBack={() => setSelectedUid(null)} />
+        <EmailReader
+          accountId={active.id}
+          emailUid={selectedUid}
+          onBack={() => setSelectedUid(null)}
+          me={active.email}
+          onReply={handleReply}
+        />
       ) : (
         <EmailList
           emails={searchMode ? searchResults : emails}

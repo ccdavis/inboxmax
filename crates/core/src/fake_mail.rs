@@ -41,9 +41,9 @@ const DEMO_REMEMBERED: [usize; 2] = [7, 8];
 
 type Mailbox = (&'static str, &'static str);
 
-/// One generated message. The mix covers what the reader has to show: a
-/// Reply-To that differs from the sender, Cc, and a delivery delayed hours
-/// after the sender's Date.
+/// One generated message. The mix covers what the reader and replies have to
+/// handle: a Reply-To that differs from the sender, Cc, a delivery delayed
+/// hours after the sender's Date, a plain-text body, and an existing thread.
 struct FakeMessage {
     from: Mailbox,
     subject: &'static str,
@@ -51,6 +51,10 @@ struct FakeMessage {
     cc: &'static [Mailbox],
     /// Minutes between the sender's Date header and the server receiving it.
     delivery_delay_minutes: i64,
+    /// A plain-text body instead of the generated HTML one.
+    text: Option<&'static str>,
+    /// Message-IDs of earlier messages in the thread (References).
+    thread: &'static [&'static str],
 }
 
 const fn message(from: Mailbox, subject: &'static str) -> FakeMessage {
@@ -60,6 +64,8 @@ const fn message(from: Mailbox, subject: &'static str) -> FakeMessage {
         reply_to: None,
         cc: &[],
         delivery_delay_minutes: 0,
+        text: None,
+        thread: &[],
     }
 }
 
@@ -77,6 +83,11 @@ const MESSAGES: &[FakeMessage] = &[
     ),
     FakeMessage {
         cc: &[("Bob Park", "bob.park@acme.example")],
+        text: Some(
+            "Hi,\n\nDoes the v2 spec still allow partial updates?\n\
+             Bob thinks we dropped them.\n\nThanks,\nSarah",
+        ),
+        thread: &["api-spec-kickoff@acme.example"],
         ..message(
             ("Sarah Chen", "sarah.chen@acme.example"),
             "Quick question about the API spec",
@@ -362,15 +373,18 @@ impl MailFetcher for FakeMailFetcher {
             cc: addresses(message.cc),
             date: Some(generated.sent()),
             received: Some(generated.received),
-            body_html: Some(format!(
-                "<h2>{subject}</h2><p>This is a generated message from the demo mailbox.</p>\
-                 <ul><li>Sender: {name}</li><li>UID: {uid}</li></ul>\
-                 <p>Read more at <a href=\"https://example.com/\">example.com</a>.</p>",
-                subject = message.subject,
-                name = generated.sender_name,
-            )),
-            body_text: None,
+            body_html: message.text.is_none().then(|| {
+                format!(
+                    "<h2>{subject}</h2><p>This is a generated message from the demo mailbox.</p>\
+                     <ul><li>Sender: {name}</li><li>UID: {uid}</li></ul>\
+                     <p>Read more at <a href=\"https://example.com/\">example.com</a>.</p>",
+                    subject = message.subject,
+                    name = generated.sender_name,
+                )
+            }),
+            body_text: message.text.map(Into::into),
             message_id: Some(format!("{uid}.{UID_VALIDITY}@fake.inboxmax.invalid")),
+            references: message.thread.iter().map(|id| id.to_string()).collect(),
         })
     }
 

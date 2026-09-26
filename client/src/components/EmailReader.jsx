@@ -4,6 +4,7 @@ import * as api from '../api';
 import Spinner from './Spinner';
 import { formatFullDate } from '../utils/dates';
 import { sameMailboxes } from '../utils/addresses';
+import { hasOtherRecipients } from '../utils/replies';
 
 function sanitizeEmailHtml(html) {
   // No img, style or class attributes: remote images and CSS backgrounds are
@@ -116,6 +117,19 @@ export function MessageHeaders({ email }) {
   );
 }
 
+function ActionButton({ onClick, icon, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-sm text-ink-soft hover:bg-hover hover:text-ink transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+    >
+      <span aria-hidden="true">{icon}</span>
+      {children}
+    </button>
+  );
+}
+
 function BackButton({ onBack, children }) {
   return (
     <button
@@ -128,7 +142,12 @@ function BackButton({ onBack, children }) {
   );
 }
 
-export default function EmailReader({ accountId, emailUid, onBack }) {
+/**
+ * One message. `onReply(kind, email)` with kind 'reply', 'all', or 'forward'
+ * offers the reply actions; `me` is the mailbox's own address, so Reply all
+ * appears only when it would reach someone besides the sender.
+ */
+export default function EmailReader({ accountId, emailUid, onBack, me, onReply }) {
   const [request, setRequest] = useState({ uid: null, email: null, error: null });
   const headingRef = useRef(null);
 
@@ -202,6 +221,15 @@ export default function EmailReader({ accountId, emailUid, onBack }) {
           {email.subject || '(no subject)'}
         </h1>
         <MessageHeaders email={email} />
+        {onReply && (
+          <div className="mt-3 flex flex-wrap gap-2">
+            <ActionButton icon="↩" onClick={() => onReply('reply', email)}>Reply</ActionButton>
+            {hasOtherRecipients(email, { me }) && (
+              <ActionButton icon="↩↩" onClick={() => onReply('all', email)}>Reply all</ActionButton>
+            )}
+            <ActionButton icon="↪" onClick={() => onReply('forward', email)}>Forward</ActionButton>
+          </div>
+        )}
       </header>
 
       <div className="flex-1 overflow-y-auto bg-canvas p-4">

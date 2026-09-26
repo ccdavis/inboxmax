@@ -86,6 +86,7 @@ impl MailFetcher for MockMailFetcher {
             body_html: None,
             body_text: Some("body".into()),
             message_id: None,
+            references: vec![],
         })
     }
 
