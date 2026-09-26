@@ -2,10 +2,11 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use chrono::NaiveDate;
 use http_body_util::BodyExt;
-use inboxmax_server::error::AppResult;
+use inboxmax_server::error::{AppError, AppResult};
 use inboxmax_server::imap_client::{
     EmailEnvelope, FullEmail, MailCredentials, MailFetcher, MailboxSnapshot,
 };
+use inboxmax_server::rate_limit::AttemptLimiter;
 use inboxmax_server::session::SessionStore;
 use inboxmax_server::{AppState, api_router};
 use serde_json::Value;
@@ -13,10 +14,13 @@ use sqlx::sqlite::SqlitePoolOptions;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-struct AcceptingMailFetcher;
+/// Mailbox password that the fake mail server rejects.
+const REJECTED_MAIL_PASSWORD: &str = "wrong-mail-password";
+
+struct FakeMailFetcher;
 
 #[async_trait::async_trait]
-impl MailFetcher for AcceptingMailFetcher {
+impl MailFetcher for FakeMailFetcher {
     async fn fetch_envelopes(
         &self,
         _credentials: &MailCredentials,
@@ -40,7 +44,10 @@ impl MailFetcher for AcceptingMailFetcher {
         Ok(vec![])
     }
 
-    async fn verify_credentials(&self, _credentials: &MailCredentials) -> AppResult<()> {
+    async fn verify_credentials(&self, credentials: &MailCredentials) -> AppResult<()> {
+        if credentials.password == REJECTED_MAIL_PASSWORD {
+            return Err(AppError::MailAuth("[AUTHENTICATIONFAILED]".into()));
+        }
         Ok(())
     }
 }
@@ -55,7 +62,8 @@ async fn state() -> AppState {
     AppState {
         db,
         sessions: SessionStore::new(),
-        mail: Arc::new(AcceptingMailFetcher),
+        mail: Arc::new(FakeMailFetcher),
+        limiter: AttemptLimiter::with_limits(3, std::time::Duration::from_secs(60)),
     }
 }
 
@@ -182,4 +190,114 @@ async fn a_mailbox_cannot_be_relinked_using_an_email_case_variant() {
         .await
         .unwrap();
     assert_eq!(second.status(), StatusCode::CONFLICT);
+}
+
+async fn body_json(response: axum::response::Response) -> Value {
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&body).unwrap()
+}
+
+fn signin_request(email: &str, password: &str) -> Request<Body> {
+    json_request(
+        "POST",
+        "/api/signin",
+        serde_json::json!({ "email": email, "password": password }),
+        None,
+    )
+}
+
+#[tokio::test]
+async fn wrong_password_reports_invalid_credentials() {
+    let state = state().await;
+    register(&state, "user@example.com").await;
+
+    for email in ["user@example.com", "nobody@example.com"] {
+        let response = api_router(state.clone())
+            .oneshot(signin_request(email, "not-the-password"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            body_json(response).await["error"],
+            "Invalid email or password"
+        );
+    }
+}
+
+#[tokio::test]
+async fn repeated_signin_failures_are_rate_limited_per_account() {
+    let state = state().await;
+    register(&state, "user@example.com").await;
+    register(&state, "other@example.com").await;
+
+    for _ in 0..3 {
+        let response = api_router(state.clone())
+            .oneshot(signin_request("user@example.com", "guess"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // Even the right password is refused until the window passes...
+    let blocked = api_router(state.clone())
+        .oneshot(signin_request("USER@example.com", "password123"))
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    // ...but other accounts are unaffected.
+    let other = api_router(state.clone())
+        .oneshot(signin_request("other@example.com", "password123"))
+        .await
+        .unwrap();
+    assert_eq!(other.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn password_length_counts_characters_not_bytes() {
+    let state = state().await;
+    let register_with = |password: &'static str| {
+        api_router(state.clone()).oneshot(json_request(
+            "POST",
+            "/api/register",
+            serde_json::json!({ "email": format!("{}@example.com", password.len()), "password": password }),
+            None,
+        ))
+    };
+
+    // Four two-byte characters: eight bytes, but only four characters.
+    let short = register_with("éééé").await.unwrap();
+    assert_eq!(short.status(), StatusCode::BAD_REQUEST);
+    let long_enough = register_with("éééééééé").await.unwrap();
+    assert_eq!(long_enough.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn rejected_mailbox_logins_are_rate_limited_per_user() {
+    let state = state().await;
+    let (cookies, _) = register(&state, "user@example.com").await;
+    let connect = |password: &'static str| {
+        api_router(state.clone()).oneshot(json_request(
+            "POST",
+            "/api/connect",
+            serde_json::json!({
+                "email": "mailbox@example.com",
+                "password": password,
+                "imap_host": "imap.example.com"
+            }),
+            Some(&cookies),
+        ))
+    };
+
+    for _ in 0..3 {
+        let response = connect(REJECTED_MAIL_PASSWORD).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error = body_json(response).await["error"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("rejected"), "{error}");
+    }
+    let blocked = connect("right-password").await.unwrap();
+    assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
 }
