@@ -48,18 +48,19 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
   }, []);
   // The open compose dialog: { title, initial, draftId, accountId }, or null.
   const [compose, setCompose] = useState(null);
-  // Where focus goes in the list when it next shows: the row of { uid } if
-  // it is there, else the next one down (after a move).
+  // Where focus goes in the list (or folder) when it next shows: the row of
+  // { uid } if it is there, else, unless `exact`, the next one down (after
+  // a move), else the heading; only if focus was lost, unless `force`.
   const [listFocus, setListFocus] = useState(null);
   const [folderFocus, setFolderFocus] = useState(null);
   const focusCount = useRef(0);
-  const focusList = (uid) => {
+  const focusList = (uid, options = {}) => {
     focusCount.current += 1;
-    setListFocus({ uid, key: focusCount.current });
+    setListFocus({ uid, key: focusCount.current, ...options });
   };
-  const focusFolder = (uid) => {
+  const focusFolder = (uid, options = {}) => {
     focusCount.current += 1;
-    setFolderFocus({ uid, key: focusCount.current });
+    setFolderFocus({ uid, key: focusCount.current, ...options });
   };
   const clearListFocus = useCallback(() => setListFocus(null), []);
   const clearFolderFocus = useCallback(() => setFolderFocus(null), []);
@@ -180,7 +181,7 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
 
   /** Back from a message to the list, onto its row. */
   const closeMessage = () => {
-    focusList(selectedUid);
+    focusList(selectedUid, { exact: true });
     setSelectedUid(null);
   };
 
@@ -198,7 +199,7 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
     setFolder(next);
     setFolderUid(null);
     // Onto the folder's heading once it has loaded.
-    focusFolder(null);
+    focusFolder(null, { force: true });
     // Choosing the open folder again shows it afresh.
     setFolderReload((n) => n + 1);
   };
@@ -543,7 +544,7 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
               emailUid={folderUid}
               folder={folder}
               onBack={() => {
-                focusFolder(folderUid);
+                focusFolder(folderUid, { exact: true });
                 setFolderUid(null);
               }}
               me={active.email}

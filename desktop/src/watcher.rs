@@ -7,9 +7,10 @@ use chrono::{Duration, Utc};
 use inboxmax_core::AppError;
 use inboxmax_core::imap_client::{EmailEnvelope, MailboxSnapshot};
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Write;
+use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 
@@ -17,15 +18,20 @@ use tauri_plugin_notification::NotificationExt;
 const CHECK_SECONDS: u64 = 120;
 /// Senders named in a notification about several messages.
 const NAMED_SENDERS: usize = 2;
+/// How long a mailbox whose password was refused is left alone.
+const REFUSED_PAUSE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+/// How long mail put back in the inbox is kept from counting as new.
+const RESTORED_WINDOW: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// What has been seen of each mailbox: its UIDVALIDITY and newest UID; and
-/// the mailboxes whose server refused their password, so it is not tried
-/// again and again (which can lock an account) until the user reconnects.
+/// the mailboxes whose server refused their password, which are left alone
+/// for a while (trying again and again can lock an account) or until the
+/// password changes.
 #[derive(Default)]
 pub struct Watcher {
     newest: HashMap<String, (Option<u32>, u32)>,
-    /// Account id to a hash of the refused password.
-    refused: HashMap<String, u64>,
+    /// Account id to a hash of the refused password, and when.
+    refused: HashMap<String, (u64, Instant)>,
 }
 
 impl Watcher {
@@ -64,15 +70,21 @@ impl Watcher {
     }
 
     /// Note that the server refused this password for the mailbox.
-    pub fn refused(&mut self, account_id: &str, password: &str) {
+    pub fn refused(&mut self, account_id: &str, password: &str, now: Instant) {
         self.refused
-            .insert(account_id.to_string(), password_hash(password));
+            .insert(account_id.to_string(), (password_hash(password), now));
     }
 
-    /// Whether to check the mailbox: not while the password its server
-    /// refused is still the one in use.
-    pub fn may_check(&self, account_id: &str, password: &str) -> bool {
-        self.refused.get(account_id) != Some(&password_hash(password))
+    /// Whether to check the mailbox: not for a while after its server
+    /// refused the password still in use (a refusal can be passing: too
+    /// many connections, say).
+    pub fn may_check(&self, account_id: &str, password: &str, now: Instant) -> bool {
+        match self.refused.get(account_id) {
+            Some(&(hash, at)) => {
+                hash != password_hash(password) || now.duration_since(at) >= REFUSED_PAUSE
+            }
+            None => true,
+        }
     }
 }
 
@@ -83,14 +95,21 @@ fn password_hash(password: &str) -> u64 {
 }
 
 /// `arrived` without messages the user just put back in the inbox (they
-/// come back under new UIDs, but are not new mail); those are forgotten.
+/// come back under new UIDs, but are not new mail); those are forgotten,
+/// as is anything put back longer ago than a check or two.
 pub fn without_restored(
     arrived: Vec<EmailEnvelope>,
-    restored: &mut HashSet<String>,
+    restored: &mut HashMap<String, Instant>,
+    now: Instant,
 ) -> Vec<EmailEnvelope> {
+    restored.retain(|_, at| now.duration_since(*at) < RESTORED_WINDOW);
     arrived
         .into_iter()
-        .filter(|e| !e.message_id.as_ref().is_some_and(|id| restored.remove(id)))
+        .filter(|e| {
+            !e.message_id
+                .as_ref()
+                .is_some_and(|id| restored.remove(id).is_some())
+        })
         .collect()
 }
 
@@ -200,7 +219,7 @@ async fn check_all(app: &AppHandle, watcher: &mut Watcher) {
     // New mail is the newest mail: a day back is plenty.
     let since = (Utc::now() - Duration::days(1)).date_naive();
     for account in &accounts {
-        if !watcher.may_check(&account.id, &account.password) {
+        if !watcher.may_check(&account.id, &account.password, Instant::now()) {
             continue;
         }
         let snapshot = match state
@@ -212,7 +231,7 @@ async fn check_all(app: &AppHandle, watcher: &mut Watcher) {
             Err(AppError::MailAuth(e)) => {
                 // The page reports it when the mailbox is next used.
                 tracing::info!("Stopped checking {} for new mail: {e}", account.email);
-                watcher.refused(&account.id, &account.password);
+                watcher.refused(&account.id, &account.password, Instant::now());
                 continue;
             }
             Err(e) => {
@@ -227,6 +246,7 @@ async fn check_all(app: &AppHandle, watcher: &mut Watcher) {
                 .restored
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            Instant::now(),
         );
         if arrived.is_empty() {
             continue;
@@ -314,28 +334,42 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_password_is_not_tried_again_until_it_changes() {
+    fn a_refused_password_is_left_alone_for_a_while() {
+        let start = Instant::now();
         let mut watcher = Watcher::default();
-        assert!(watcher.may_check("work", "old"));
-        watcher.refused("work", "old");
-        assert!(!watcher.may_check("work", "old"));
-        assert!(watcher.may_check("work", "new"), "reconnected");
-        assert!(watcher.may_check("home", "old"));
+        assert!(watcher.may_check("work", "old", start));
+        watcher.refused("work", "old", start);
+        assert!(!watcher.may_check("work", "old", start + REFUSED_PAUSE / 2));
+        // A refusal can pass (too many connections, say): later, try again.
+        assert!(watcher.may_check("work", "old", start + REFUSED_PAUSE));
+        assert!(watcher.may_check("work", "new", start), "reconnected");
+        assert!(watcher.may_check("home", "old", start));
         // Closing the mailbox forgets it.
         watcher.retain(&[]);
-        assert!(watcher.may_check("work", "old"));
+        assert!(watcher.may_check("work", "old", start));
     }
 
     #[test]
     fn mail_put_back_in_the_inbox_is_not_new() {
+        let now = Instant::now();
         let mut arrived = vec![envelope(7, "A", "Back"), envelope(8, "B", "New")];
         arrived[0].message_id = Some("back@x".into());
         arrived[1].message_id = Some("new@x".into());
-        let mut restored = HashSet::from(["back@x".to_string()]);
-        assert_eq!(uids(&without_restored(arrived.clone(), &mut restored)), [8]);
+        let mut restored = HashMap::from([("back@x".to_string(), now)]);
+        assert_eq!(
+            uids(&without_restored(arrived.clone(), &mut restored, now)),
+            [8]
+        );
         // Only the once: moved out and back in again later, it is noticed.
         assert!(restored.is_empty());
-        assert_eq!(uids(&without_restored(arrived, &mut restored)), [7, 8]);
+        assert_eq!(
+            uids(&without_restored(arrived.clone(), &mut restored, now)),
+            [7, 8]
+        );
+        // Nor is it kept for ever when the watcher never sees it come back.
+        restored.insert("gone@x".into(), now);
+        without_restored(Vec::new(), &mut restored, now + RESTORED_WINDOW);
+        assert!(restored.is_empty());
     }
 
     #[test]

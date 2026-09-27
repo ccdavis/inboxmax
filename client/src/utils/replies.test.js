@@ -138,6 +138,9 @@ describe('mailtoDraft', () => {
     expect(odd.pending.to).toBe('not-an-address');
     expect(odd.subject).toBe('%E0%A4%A');
     expect(odd.focus).toBe('to');
+    // Only the first ? and = split.
+    const marks = mailtoDraft('mailto:x@y.example?subject=Coming?&body=a=b');
+    expect([marks.subject, marks.body]).toEqual(['Coming?', 'a=b']);
   });
 });
 

@@ -419,6 +419,7 @@ const ARCHIVE_FOLDER_NAMES: &[&str] = &[
     "Archive",
     "Archives",
     "INBOX.Archive",
+    "INBOX/Archive",
     "[Gmail]/All Mail",
     "[Google Mail]/All Mail",
 ];
@@ -665,27 +666,53 @@ async fn move_uid(session: &mut ImapSession, uid: u32, to: &str) -> AppResult<()
         .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {e}")))
 }
 
-/// UIDs in the selected folder with this Message-ID, newest first.
+/// Candidates checked for an exact Message-ID; more would be a strange search.
+const MAX_MESSAGE_ID_MATCHES: usize = 50;
+
+/// A Message-ID as compared: without spaces or angle brackets (which not
+/// every sender uses).
+fn bare_message_id(id: &str) -> &str {
+    id.trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .trim()
+}
+
+/// UIDs in the selected folder with exactly this Message-ID, newest first.
 async fn find_message_id(session: &mut ImapSession, message_id: &str) -> AppResult<Vec<u32>> {
-    // HEADER matches substrings: with the angle brackets, "123@x" cannot
-    // match "<99123@x>", and nothing left to search for matches nothing
-    // rather than every message.
-    let id = sanitize_imap_query(
-        message_id
-            .trim()
-            .trim_start_matches('<')
-            .trim_end_matches('>'),
-    );
+    let wanted = bare_message_id(message_id);
+    let id = sanitize_imap_query(wanted);
+    // Nothing left to search for would match every message.
     if id.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let mut uids: Vec<u32> = session
-        .uid_search(format!("HEADER Message-ID \"<{id}>\""))
+    // HEADER matches substrings ("123@x" is in "<99123@x>"), so the
+    // candidates are checked against the whole ID.
+    let candidates = newest_uid_strings(
+        session
+            .uid_search(format!("HEADER Message-ID \"{id}\""))
+            .await
+            .map_err(|e| AppError::Imap(format!("SEARCH failed: {e}")))?,
+        MAX_MESSAGE_ID_MATCHES,
+    );
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let fetched: Vec<_> = session
+        .uid_fetch(candidates.join(","), "(UID ENVELOPE)")
         .await
-        .map_err(|e| AppError::Imap(format!("SEARCH failed: {e}")))?
-        .into_iter()
+        .map_err(|e| AppError::Imap(format!("FETCH failed: {e}")))?
+        .try_collect()
+        .await
+        .map_err(|e| AppError::Imap(format!("FETCH stream failed: {e}")))?;
+    let mut uids: Vec<u32> = fetched
+        .iter()
+        .filter_map(parse_envelope)
+        .filter(|e| e.message_id.as_deref().map(bare_message_id) == Some(wanted))
+        .map(|e| e.uid)
         .collect();
     uids.sort_unstable_by(|a, b| b.cmp(a));
+    uids.dedup();
     Ok(uids)
 }
 

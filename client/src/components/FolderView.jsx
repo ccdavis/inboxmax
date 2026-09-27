@@ -4,7 +4,7 @@ import Spinner from './Spinner';
 import { formatTime } from '../utils/dates';
 import { senderColor, senderInitial, senderName } from '../utils/senders';
 import { folderLabel, serverName } from '../utils/folders';
-import { focusRow } from '../utils/focus';
+import { focusRow, mayMoveFocus } from '../utils/focus';
 
 /**
  * The newest messages in one of the server's folders, to look through.
@@ -35,9 +35,12 @@ export default function FolderView({ accountId, folder, onSelect, onBack, reload
 
   const listRef = useRef(null);
   const headingRef = useRef(null);
+  const rootRef = useRef(null);
   useEffect(() => {
     if (!focusRequest || loading) return;
-    focusRow(listRef.current, focusRequest.uid, headingRef.current);
+    if (mayMoveFocus(rootRef.current, focusRequest)) {
+      focusRow(listRef.current, focusRequest.uid, headingRef.current, focusRequest);
+    }
     onFocused?.();
   }, [focusRequest, loading, onFocused]);
 
@@ -47,7 +50,7 @@ export default function FolderView({ accountId, folder, onSelect, onBack, reload
   const count = state.emails.length;
 
   return (
-    <div className="flex flex-col h-full">
+    <div ref={rootRef} className="flex flex-col h-full">
       <div className="px-4 py-2 min-h-12 border-b border-line bg-canvas flex items-center justify-between gap-2">
         <div className="flex items-center gap-3 min-w-0">
           <button

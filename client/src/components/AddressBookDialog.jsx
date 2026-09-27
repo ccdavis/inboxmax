@@ -3,6 +3,7 @@ import * as api from '../api';
 import Dialog from './Dialog';
 import Spinner from './Spinner';
 import { formatAddress } from '../utils/addresses';
+import { mayMoveFocus } from '../utils/focus';
 
 const INPUT =
   'min-w-0 rounded-lg border border-line bg-field px-3 py-1.5 text-sm text-ink placeholder-ink-faint focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent';
@@ -148,6 +149,9 @@ export default function AddressBookDialog({ onClose }) {
     const index = focusAfterDelete.current;
     if (index == null) return;
     focusAfterDelete.current = null;
+    // Only if its buttons took the focus with them (the reload may also
+    // come much later, after a failed one, when focus is elsewhere).
+    if (!mayMoveFocus(listRef.current)) return;
     const rows = listRef.current?.querySelectorAll('li') ?? [];
     const row = rows[Math.min(index, rows.length - 1)];
     (row?.querySelector('button') ?? filterRef.current)?.focus();

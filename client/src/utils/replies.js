@@ -147,6 +147,12 @@ export function forwardDraft(email, { folder = null } = {}) {
   };
 }
 
+/** `text` cut at the first `separator`: what comes before it, and after. */
+function splitOnce(text, separator) {
+  const at = text.indexOf(separator);
+  return at < 0 ? [text, ''] : [text.slice(0, at), text.slice(at + separator.length)];
+}
+
 function decodePart(text) {
   try {
     return decodeURIComponent(text);
@@ -162,10 +168,10 @@ function decodePart(text) {
  */
 export function mailtoDraft(href) {
   const rest = href.replace(/^mailto:/i, '');
-  const [path, query = ''] = rest.split('?', 2);
+  const [path, query] = splitOnce(rest, '?');
   const params = {};
   for (const pair of query.split('&')) {
-    const [key, value = ''] = pair.split('=', 2);
+    const [key, value] = splitOnce(pair, '=');
     if (key) params[decodePart(key).toLowerCase()] ??= decodePart(value);
   }
   const field = (text) => {

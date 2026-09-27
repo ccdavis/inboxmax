@@ -84,6 +84,9 @@ export default function ComposeDialog({
   const [confirming, setConfirming] = useState(null);
   // 'saving', 'saved', or { error } for the draft; null before any save.
   const [draftState, setDraftState] = useState(null);
+  // The last save's failure, kept while a retry is under way, so the
+  // announcement is made once rather than after every pause in typing.
+  const [draftError, setDraftError] = useState(null);
   const inputs = { to: useRef(null), cc: useRef(null), bcc: useRef(null) };
   const bodyRef = useRef(null);
   const subjectRef = useRef(null);
@@ -160,10 +163,12 @@ export default function ComposeDialog({
         savedSignature.current = saved;
         hasDraft.current = true;
         setDraftState('saved');
+        setDraftError(null);
         return true;
       })
       .catch((caught) => {
         setDraftState({ error: caught.message });
+        setDraftError(caught.message);
         return false;
       });
     saving.current = attempt;
@@ -433,8 +438,8 @@ export default function ComposeDialog({
               {error}
             </p>
           )}
-          {draftState?.error && (
-            <p role="alert" className="sr-only">Draft not saved: {draftState.error}</p>
+          {draftError && (
+            <p role="alert" className="sr-only">Draft not saved: {draftError}</p>
           )}
           {/* A question takes the focus (so it is read out) and gives it back. */}
           {confirming === 'discard' ? (

@@ -2,7 +2,7 @@ import { useRef, useEffect } from 'react';
 import EmailRow from './EmailRow';
 import Spinner from './Spinner';
 import { isToday } from '../utils/dates';
-import { focusRow } from '../utils/focus';
+import { focusRow, mayMoveFocus } from '../utils/focus';
 
 const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
 
@@ -109,12 +109,15 @@ export default function EmailList({
 
   const listRef = useRef(null);
   const headingRef = useRef(null);
+  const rootRef = useRef(null);
 
   // Put focus where it was asked for (back from a message, or after one
   // left the list), once.
   useEffect(() => {
     if (!focusRequest) return;
-    focusRow(listRef.current, focusRequest.uid, headingRef.current);
+    if (mayMoveFocus(rootRef.current, focusRequest)) {
+      focusRow(listRef.current, focusRequest.uid, headingRef.current, focusRequest);
+    }
     onFocused?.();
   }, [focusRequest, onFocused]);
 
@@ -173,7 +176,7 @@ export default function EmailList({
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div ref={rootRef} className="flex flex-col h-full">
       <div className="px-4 py-2 min-h-12 border-b border-line bg-canvas flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <h2 ref={headingRef} tabIndex={-1} className="text-sm font-medium text-ink-muted truncate focus:outline-none" aria-live="polite">{headerText}</h2>

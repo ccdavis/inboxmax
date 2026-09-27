@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 
 /**
  * A modal dialog: full screen on phones, a centered panel on wider screens.
@@ -17,9 +17,11 @@ export default function Dialog({ title, onClose, closeDisabled = false, onKeyDow
   });
 
   // Focus moves in when the dialog opens (unless a field inside took it),
-  // and back to whatever opened it when it closes, so neither is lost.
+  // and back to whatever opened it when it closes, so neither is lost. The
+  // opener is noted while rendering, before the page behind goes inert and
+  // gives up its focus.
+  const [opener] = useState(() => document.activeElement);
   useEffect(() => {
-    const opener = document.activeElement;
     if (!panel.current?.contains(document.activeElement)) {
       const first = panel.current?.querySelector(
         'input:not([disabled]), textarea:not([disabled]), select:not([disabled]), button:not([disabled]):not([data-dialog-close]), [href], [tabindex]:not([tabindex="-1"])',
@@ -34,7 +36,7 @@ export default function Dialog({ title, onClose, closeDisabled = false, onKeyDow
         }
       }, 0);
     };
-  }, []);
+  }, [opener]);
 
   const handleKeyDown = (e) => {
     onKeyDown?.(e);

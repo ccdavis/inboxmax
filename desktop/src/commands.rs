@@ -273,7 +273,7 @@ pub async fn restore_email(
         .restored
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(message_id);
+        .insert(message_id, std::time::Instant::now());
     Ok(restored)
 }
 

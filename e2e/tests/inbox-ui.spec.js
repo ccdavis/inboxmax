@@ -94,7 +94,7 @@ test('seen rows are greyed out in both light and dark mode', async ({ browser })
     const context = await browser.newContext({ colorScheme });
     const page = await context.newPage();
     await openInbox(page);
-    const [unseen, seen] = await Promise.all(
+    const styles = () => Promise.all(
       [`[data-uid="${WATERMARK + 1}"]`, `[data-uid="${WATERMARK - 1}"]`].map((selector) =>
         page.locator(selector).evaluate((row) => ({
           background: getComputedStyle(row).backgroundColor,
@@ -102,8 +102,11 @@ test('seen rows are greyed out in both light and dark mode', async ({ browser })
         })),
       ),
     );
-    expect(seen.background, colorScheme).not.toBe(unseen.background);
-    expect(seen.text, colorScheme).not.toBe(unseen.text);
+    // Rows fade between states, so read the colors once they settle.
+    await expect.poll(async () => {
+      const [unseen, seen] = await styles();
+      return seen.background !== unseen.background && seen.text !== unseen.text;
+    }, { message: colorScheme }).toBe(true);
     await context.close();
   }
 });

@@ -30,7 +30,7 @@ pub struct DesktopState {
     loaded: watch::Sender<bool>,
     /// Message-IDs the user just put back in an inbox (Undo, Move to
     /// Inbox): back under new UIDs, but not new mail.
-    pub restored: std::sync::Mutex<HashSet<String>>,
+    pub restored: std::sync::Mutex<HashMap<String, std::time::Instant>>,
 }
 
 /// Run a (blocking, possibly prompting) credential-store call off the async runtime.

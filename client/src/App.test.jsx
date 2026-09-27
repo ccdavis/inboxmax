@@ -280,6 +280,21 @@ describe('inbox page', () => {
       await waitFor(() => expect(document.activeElement).toHaveTextContent('Twelve'));
     });
 
+    it('leaves focus where the user took it while a delete was slow', async () => {
+      let finish;
+      api.moveEmail.mockReturnValue(new Promise((resolve) => {
+        finish = resolve;
+      }));
+      renderInbox();
+      await screen.findByText('Thirty');
+      fireEvent.click(screen.getByRole('button', { name: 'Delete “Thirty”' }));
+      const search = screen.getByRole('textbox', { name: /Search emails/ });
+      search.focus();
+      await act(async () => finish({ ok: true }));
+      await expectStatus('Moved to Trash.');
+      expect(search).toHaveFocus();
+    });
+
     it("drops a mailbox's Undo on switching to another", async () => {
       api.listAccounts.mockResolvedValue([WORK, HOME]);
       renderInbox();
