@@ -1,14 +1,30 @@
-import { useState, useEffect, useRef } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { hasLoadableImages, sanitizeEmailHtml } from '../utils/emailHtml';
 import * as api from '../api';
 import Spinner from './Spinner';
 import { formatFullDate } from '../utils/dates';
 import { sameMailboxes } from '../utils/addresses';
-import { hasOtherRecipients } from '../utils/replies';
+import { hasOtherRecipients, mailtoDraft } from '../utils/replies';
 import { formatSize } from '../utils/files';
 import { canMoveToInbox, folderLabel } from '../utils/folders';
 import { ArchiveIcon, TrashIcon } from './icons';
 
+/**
+ * The message's (sanitized) HTML. React rewrites innerHTML on every render
+ * of an element that sets it, which would rebuild the email under the
+ * reader (losing a focused link, a selection, a screen reader's place)
+ * each time anything else on the page changed; so it renders only when
+ * the HTML does.
+ */
+const EmailBody = memo(function EmailBody({ html, onClick }) {
+  return (
+    <div
+      className="prose prose-sm prose-slate dark:prose-invert max-w-none break-words prose-a:text-accent prose-img:inline-block prose-img:my-2 prose-img:max-w-full prose-img:h-auto"
+      onClick={onClick}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+});
 
 // Sender and server clocks disagree by seconds routinely; beyond this the
 // sent time is worth showing next to the received time.
@@ -186,15 +202,17 @@ function BackButton({ onBack, children }) {
  * One message. `onReply(kind, email)` with kind 'reply', 'all', or 'forward'
  * offers the reply actions; `me` is the mailbox's own address, so Reply all
  * appears only when it would reach someone besides the sender.
- * `onMove(email, 'archive' | 'trash')` offers Archive and Delete.
+ * `onMove(email, 'archive' | 'trash')` offers Archive and Delete, and
+ * `onWrite(initial)` starts a message from a mailto: link in the email.
  *
  * With `folder` ({ kind, name }) the message is one in that server folder,
  * read without marking it read; `onMoveToInbox(email)` offers to put it back.
  */
-export default function EmailReader({ accountId, emailUid, folder, onBack, me, onReply, onMove, onMoveToInbox }) {
+export default function EmailReader({ accountId, emailUid, folder, onBack, me, onReply, onWrite, onMove, onMoveToInbox }) {
   const [request, setRequest] = useState({ key: null, email: null, error: null });
   // The message whose images the user asked to see; only ever that one.
   const [imagesShownFor, setImagesShownFor] = useState(null);
+  const imagesShownRef = useRef(null);
   const headingRef = useRef(null);
   const folderKind = folder?.kind ?? null;
   // UIDs are only unique within one folder.
@@ -222,6 +240,31 @@ export default function EmailReader({ accountId, emailUid, folder, onBack, me, o
   useEffect(() => {
     if (loaded) headingRef.current?.focus();
   }, [loaded]);
+  const imagesShown = imagesShownFor === key;
+  useEffect(() => {
+    if (imagesShown) imagesShownRef.current?.focus();
+  }, [imagesShown]);
+
+  // An address link starts a message here. The desktop WebView cannot
+  // follow target="_blank" links, so web links go to the system browser.
+  // (Enter on a focused link also fires click.) The handler never changes,
+  // so the body is not redrawn; it reads the latest onWrite.
+  const onWriteRef = useRef(onWrite);
+  useEffect(() => {
+    onWriteRef.current = onWrite;
+  });
+  const handleBodyClick = useCallback((e) => {
+    const link = e.target.closest?.('a[href]');
+    if (!link) return;
+    if (onWriteRef.current && /^mailto:/i.test(link.getAttribute('href'))) {
+      e.preventDefault();
+      onWriteRef.current(mailtoDraft(link.getAttribute('href')));
+      return;
+    }
+    if (!api.isDesktop) return;
+    e.preventDefault();
+    api.openExternal(link.href).catch(() => {});
+  }, []);
 
   if (request.key !== key) {
     return (
@@ -246,18 +289,8 @@ export default function EmailReader({ accountId, emailUid, folder, onBack, me, o
 
   const email = request.email;
 
-  // The desktop WebView cannot follow target="_blank" links, so hand them to
-  // the system browser. (Enter on a focused link also fires click.)
-  const handleBodyClick = (e) => {
-    const link = e.target.closest?.('a[href]');
-    if (!link || !api.isDesktop) return;
-    e.preventDefault();
-    api.openExternal(link.href).catch(() => {});
-  };
-
-  const showImages = imagesShownFor === key;
-  const bodyHtml = email.body_html ? sanitizeEmailHtml(email.body_html, { images: showImages }) : null;
-  const imagesBlocked = !showImages && hasLoadableImages(email.body_html);
+  const bodyHtml = email.body_html ? sanitizeEmailHtml(email.body_html, { images: imagesShown }) : null;
+  const imagesBlocked = !imagesShown && hasLoadableImages(email.body_html);
 
   return (
     <article className="flex flex-col h-full">
@@ -315,12 +348,14 @@ export default function EmailReader({ accountId, emailUid, folder, onBack, me, o
             </button>
           </p>
         )}
+        {imagesShown && (
+          // Takes the focus from the button it replaces, and says what happened.
+          <p ref={imagesShownRef} tabIndex={-1} className="mb-3 text-xs text-ink-muted rounded px-3 py-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500">
+            Images are shown for this message.
+          </p>
+        )}
         {bodyHtml ? (
-          <div
-            className="prose prose-sm prose-slate dark:prose-invert max-w-none break-words prose-a:text-accent prose-img:inline-block prose-img:my-2 prose-img:max-w-full prose-img:h-auto"
-            onClick={handleBodyClick}
-            dangerouslySetInnerHTML={{ __html: bodyHtml }}
-          />
+          <EmailBody html={bodyHtml} onClick={handleBodyClick} />
         ) : (
           <pre className="whitespace-pre-wrap break-words text-sm text-ink-soft font-sans">
             {email.body_text || '(empty message)'}

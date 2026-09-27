@@ -55,9 +55,16 @@ describe('Inbox Max desktop new mail', () => {
 
   it('notifies of new mail while the window is not in use', () =>
     withApp(async (session) => {
-      // The demo reopens, and its message comes again a few seconds later.
+      // Reopened at launch, the demo gets no new mail (so someone who once
+      // tried it is not told of any)...
       await session.find('main h2', { text: 'new' });
+      await sleep(8000);
+      assert.equal(await session.execute('return document.body.textContent.includes("New mail, just now")'), false);
+      // ...until it is opened again.
       rmSync(log, { force: true });
+      await (await session.find('aside button', { text: 'Add mailbox' })).click();
+      await (await session.find('button', { text: 'Try the demo mailbox' })).click();
+      await session.find('main h2', { text: '4 new' });
       await session.cmd('POST', '/window/minimize', {});
 
       const deadline = Date.now() + 20000;

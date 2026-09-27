@@ -122,4 +122,22 @@ describe('FolderView', () => {
     fireEvent.click(screen.getByRole('button', { name: /Inbox/ }));
     await waitFor(() => expect(onBack).toHaveBeenCalled());
   });
+
+  it('puts focus back on the row it is asked for, or where it was, once loaded', async () => {
+    api.getFolderEmails.mockResolvedValue([{ ...PRIZE, uid: 9 }, PRIZE]);
+    const onFocused = vi.fn();
+    const { rerender } = render(
+      <FolderView accountId="a" folder={JUNK} onSelect={() => {}} onBack={() => {}} focusRequest={{ uid: 1, key: 1 }} onFocused={onFocused} />,
+    );
+    await waitFor(() => expect(document.activeElement).toHaveAccessibleName('Prize Desk: You have won!'));
+    expect(document.activeElement.closest('li')).toHaveAttribute('data-uid', '1');
+    expect(onFocused).toHaveBeenCalledTimes(1);
+
+    // A message that is gone: the next one down, else the last.
+    rerender(<FolderView accountId="a" folder={JUNK} onSelect={() => {}} onBack={() => {}} focusRequest={{ uid: 5, key: 2 }} onFocused={onFocused} />);
+    await waitFor(() => expect(document.activeElement.closest('li')).toHaveAttribute('data-uid', '1'));
+    // No message at all: the heading.
+    rerender(<FolderView accountId="a" folder={JUNK} onSelect={() => {}} onBack={() => {}} focusRequest={{ uid: null, key: 3 }} onFocused={onFocused} />);
+    await waitFor(() => expect(screen.getByRole('heading')).toHaveFocus());
+  });
 });

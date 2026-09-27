@@ -132,4 +132,37 @@ describe('recipient suggestions', () => {
     answer();
     await waitFor(() => expect(options().map((o) => o.textContent)).toEqual(['Sarah Chen <sarah.chen@acme.example>']));
   });
+
+  it('takes a comma inside a quoted name as part of the name', () => {
+    const { to } = renderCompose(vi.fn(async () => []));
+    type(to, '"Chen');
+    fireEvent.keyDown(to, { key: ',' });
+    // Not cut off at the comma, and no complaint about "Chen.
+    expect(chips()).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+    type(to, '"Chen, Sarah" <s@x.example>, bob@x.example');
+    expect(chips()).toHaveTextContent('Chen, Sarah <s@x.example>');
+    expect(within(chips()).getAllByRole('listitem')).toHaveLength(1);
+    expect(to).toHaveValue('bob@x.example');
+  });
+
+  it('says when recipients are added and removed, and keeps focus in the field', async () => {
+    const { to } = renderCompose(vi.fn(async () => []));
+    type(to, 'a@x.example');
+    fireEvent.keyDown(to, { key: 'Enter' });
+    const spoken = () => to.closest('.border-b').querySelector('[aria-live="polite"]');
+    expect(spoken()).toHaveTextContent('Added a@x.example');
+
+    const remove = screen.getByRole('button', { name: 'Remove a@x.example' });
+    remove.focus();
+    fireEvent.click(remove);
+    expect(chips()).toBeNull();
+    expect(to).toHaveFocus();
+    expect(spoken()).toHaveTextContent('Removed a@x.example');
+
+    type(to, 'b@x.example');
+    fireEvent.keyDown(to, { key: 'Enter' });
+    fireEvent.keyDown(to, { key: 'Backspace' });
+    expect(spoken()).toHaveTextContent('Removed b@x.example');
+  });
 });

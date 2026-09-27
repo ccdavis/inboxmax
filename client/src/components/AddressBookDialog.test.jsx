@@ -120,7 +120,7 @@ describe('AddressBookDialog', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it('still closes with Escape after the focused row was deleted', async () => {
+  it('moves focus on, and says so, when the focused row is deleted', async () => {
     const { onClose } = renderBook();
     await screen.findByRole('list', { name: 'Contacts' });
     api.listContacts.mockResolvedValue([SAM]);
@@ -128,8 +128,17 @@ describe('AddressBookDialog', () => {
     button.focus();
     fireEvent.click(button);
     await waitFor(() => expect(rows()).toHaveLength(1));
-    // The button is gone, so focus is on the page body now.
-    expect(document.activeElement).toBe(document.body);
+    // Onto the row that took its place, not lost to the page.
+    await waitFor(() => expect(within(rows()[0]).getAllByRole('button')).toContain(document.activeElement));
+    expect(screen.getByRole('status')).toHaveTextContent('Deleted Sarah Chen <sarah.chen@acme.example>');
+    fireEvent.keyDown(document.activeElement, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('still closes with Escape when focus has fallen to the page', async () => {
+    const { onClose } = renderBook();
+    await screen.findByRole('list', { name: 'Contacts' });
+    document.activeElement.blur();
     fireEvent.keyDown(document.body, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(1);
   });

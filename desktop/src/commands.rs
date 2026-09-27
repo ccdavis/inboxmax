@@ -268,7 +268,13 @@ pub async fn restore_email(
     message_id: String,
 ) -> AppResult<Restored> {
     let account = state.require_account(&account_id).await?;
-    mailbox::restore_email(state.mail.as_ref(), &account, from, &message_id).await
+    let restored = mailbox::restore_email(state.mail.as_ref(), &account, from, &message_id).await?;
+    state
+        .restored
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(message_id);
+    Ok(restored)
 }
 
 #[derive(Serialize)]
@@ -280,7 +286,7 @@ pub struct SavedFile {
 
 /// The Downloads folder, or INBOXMAX_DOWNLOAD_DIR (for tests).
 fn download_dir(app: &tauri::AppHandle) -> AppResult<std::path::PathBuf> {
-    if let Some(dir) = std::env::var_os("INBOXMAX_DOWNLOAD_DIR") {
+    if let Some(dir) = crate::test_setting("INBOXMAX_DOWNLOAD_DIR") {
         return Ok(dir.into());
     }
     app.path()
@@ -334,8 +340,9 @@ async fn save_to_downloads(
 }
 
 /// Show a saved attachment in the file manager. Only files in Downloads.
+/// Async, so the checks never hold up the window.
 #[tauri::command]
-pub fn show_in_folder(app: tauri::AppHandle, path: String) -> AppResult<()> {
+pub async fn show_in_folder(app: tauri::AppHandle, path: String) -> AppResult<()> {
     let path = std::path::PathBuf::from(path);
     if !downloads::is_inside(&download_dir(&app)?, &path) {
         return Err(AppError::BadRequest(

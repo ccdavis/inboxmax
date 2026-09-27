@@ -1,5 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import { commitText, formatAddress, isEmailAddress, withAddresses } from '../utils/addresses';
+import {
+  commitText, endsInsideQuotes, formatAddress, isEmailAddress, splitAtLastSeparator, withAddresses,
+} from '../utils/addresses';
 
 const SEPARATOR = /[,;\n]/;
 // Wait for a pause in typing before asking for suggestions.
@@ -30,6 +32,8 @@ export default function RecipientField({ label, value, onChange, inputRef, error
   const [result, setResult] = useState({ query: null, items: [] });
   const [active, setActive] = useState(-1);
   const request = useRef(0);
+  const ownRef = useRef(null);
+  const fieldRef = inputRef ?? ownRef;
   const query = value.text.trim();
   const suggestions = result.query === query ? result.items : [];
   const open = suggestions.length > 0;
@@ -61,14 +65,25 @@ export default function RecipientField({ label, value, onChange, inputRef, error
     setActive(-1);
   };
 
+  // Adding and removing recipients is said out loud, since the chips appear
+  // and go away out of sight of a screen reader's focus.
+  const [spoken, setSpoken] = useState('');
+  const announceAdded = (before, after) => {
+    const added = after.filter((a) => !before.includes(a));
+    if (added.length) setSpoken(`Added ${added.map(formatAddress).join(', ')}`);
+  };
+
   const commit = (next = value) => {
     const { value: committed, invalid } = commitText(next);
     onChange(committed);
+    announceAdded(next.addresses, committed.addresses);
     onError?.(invalidMessage(invalid));
   };
 
   const pick = (contact) => {
-    onChange({ addresses: withAddresses(value.addresses, [{ name: contact.name, email: contact.email }]), text: '' });
+    const address = { name: contact.name, email: contact.email };
+    onChange({ addresses: withAddresses(value.addresses, [address]), text: '' });
+    setSpoken(`Added ${formatAddress(address)}`);
     onError?.(null);
     close();
   };
@@ -96,7 +111,10 @@ export default function RecipientField({ label, value, onChange, inputRef, error
       pick(suggestions[active]);
       return;
     }
-    if ((e.key === 'Enter' || e.key === ',' || e.key === ';') && value.text.trim()) {
+    // A comma inside "Chen, Sarah" is part of the name.
+    const separates = e.key === 'Enter'
+      || ((e.key === ',' || e.key === ';') && !endsInsideQuotes(value.text));
+    if (separates && value.text.trim()) {
       e.preventDefault();
       commit();
       close();
@@ -107,7 +125,9 @@ export default function RecipientField({ label, value, onChange, inputRef, error
       commit();
       close();
     } else if (e.key === 'Backspace' && !value.text && value.addresses.length) {
+      const removed = value.addresses.at(-1);
       onChange({ ...value, addresses: value.addresses.slice(0, -1) });
+      setSpoken(`Removed ${formatAddress(removed)}`);
     }
   };
 
@@ -115,11 +135,12 @@ export default function RecipientField({ label, value, onChange, inputRef, error
     const text = e.target.value;
     // A pasted list, or a separator typed mid-text: keep everything up to
     // the last separator as chips and leave the rest for typing.
-    if (SEPARATOR.test(text)) {
-      const cut = Math.max(text.lastIndexOf(','), text.lastIndexOf(';'), text.lastIndexOf('\n'));
-      const { value: committed, invalid } = commitText({ addresses: value.addresses, text: text.slice(0, cut) });
-      const rest = text.slice(cut + 1).trimStart();
+    const split = splitAtLastSeparator(text);
+    if (split) {
+      const { value: committed, invalid } = commitText({ addresses: value.addresses, text: split.before });
+      const rest = split.after.trimStart();
       onChange({ addresses: committed.addresses, text: [committed.text, rest].filter(Boolean).join(', ') });
+      announceAdded(value.addresses, committed.addresses);
       onError?.(invalidMessage(invalid));
       return;
     }
@@ -134,6 +155,9 @@ export default function RecipientField({ label, value, onChange, inputRef, error
 
   const remove = (address) => {
     onChange({ ...value, addresses: value.addresses.filter((a) => a !== address) });
+    setSpoken(`Removed ${formatAddress(address)}`);
+    // The chip's button is gone; the text box is where to carry on.
+    fieldRef.current?.focus();
   };
 
   const optionId = (index) => `${listId}-${index}`;
@@ -146,7 +170,7 @@ export default function RecipientField({ label, value, onChange, inputRef, error
         </label>
         <div className="relative flex min-w-0 flex-1 flex-wrap items-center gap-1">
           {value.addresses.length > 0 && (
-            <ul aria-label={`${label} recipients`} className="contents">
+            <ul aria-label={`${label} recipients`} className="flex max-w-full flex-wrap items-center gap-1">
               {value.addresses.map((address) => (
                 <li
                   key={address.email}
@@ -176,7 +200,7 @@ export default function RecipientField({ label, value, onChange, inputRef, error
           )}
           <input
             id={id}
-            ref={inputRef}
+            ref={fieldRef}
             type="text"
             role="combobox"
             aria-autocomplete="list"
@@ -224,6 +248,7 @@ export default function RecipientField({ label, value, onChange, inputRef, error
         </div>
         {trailing}
       </div>
+      <span className="sr-only" aria-live="polite">{spoken}</span>
       {error && (
         <p id={errorId} role="alert" className="pb-1.5 pl-14 text-xs text-danger-ink">
           {error}

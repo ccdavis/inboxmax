@@ -4,21 +4,43 @@ import { useEffect, useId, useRef } from 'react';
  * A modal dialog: full screen on phones, a centered panel on wider screens.
  * The page behind it should be made inert while it is open. Escape and the
  * ✕ call `onClose`, unless the dialog's own `onKeyDown` handled Escape first
- * (by calling preventDefault), as a dialog with unsaved work does to ask.
+ * (by calling preventDefault), as a dialog with unsaved work does to ask,
+ * or `closeDisabled` is set. Focus starts on its first control and returns
+ * to what opened it.
  */
 export default function Dialog({ title, onClose, closeDisabled = false, onKeyDown, className = '', children }) {
   const titleId = useId();
   const panel = useRef(null);
-  const handlers = useRef({ onKeyDown, onClose });
+  const handlers = useRef({ onKeyDown, onClose, closeDisabled });
   useEffect(() => {
-    handlers.current = { onKeyDown, onClose };
+    handlers.current = { onKeyDown, onClose, closeDisabled };
   });
+
+  // Focus moves in when the dialog opens (unless a field inside took it),
+  // and back to whatever opened it when it closes, so neither is lost.
+  useEffect(() => {
+    const opener = document.activeElement;
+    if (!panel.current?.contains(document.activeElement)) {
+      const first = panel.current?.querySelector(
+        'input:not([disabled]), textarea:not([disabled]), select:not([disabled]), button:not([disabled]):not([data-dialog-close]), [href], [tabindex]:not([tabindex="-1"])',
+      );
+      (first ?? panel.current)?.focus();
+    }
+    return () => {
+      // After the page behind stops being inert.
+      setTimeout(() => {
+        if (opener instanceof HTMLElement && opener.isConnected && !document.querySelector('[role="dialog"]')) {
+          opener.focus();
+        }
+      }, 0);
+    };
+  }, []);
 
   const handleKeyDown = (e) => {
     onKeyDown?.(e);
     if (e.key === 'Escape' && !e.defaultPrevented) {
       e.preventDefault();
-      onClose();
+      if (!closeDisabled) onClose();
     }
   };
 
@@ -31,7 +53,7 @@ export default function Dialog({ title, onClose, closeDisabled = false, onKeyDow
       handlers.current.onKeyDown?.(e);
       if (e.key === 'Escape' && !e.defaultPrevented) {
         e.preventDefault();
-        handlers.current.onClose();
+        if (!handlers.current.closeDisabled) handlers.current.onClose();
       }
     };
     document.addEventListener('keydown', onDocumentKeyDown);
@@ -43,6 +65,7 @@ export default function Dialog({ title, onClose, closeDisabled = false, onKeyDow
       <div
         ref={panel}
         role="dialog"
+        tabIndex={-1}
         aria-modal="true"
         aria-labelledby={titleId}
         onKeyDown={handleKeyDown}
@@ -52,6 +75,7 @@ export default function Dialog({ title, onClose, closeDisabled = false, onKeyDow
           <h2 id={titleId} className="font-semibold text-ink">{title}</h2>
           <button
             type="button"
+            data-dialog-close
             onClick={onClose}
             disabled={closeDisabled}
             className="rounded p-1.5 text-ink-muted hover:bg-hover hover:text-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"

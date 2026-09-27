@@ -22,3 +22,10 @@ describe('withSignature', () => {
     expect(withSignature(reply, undefined)).toBe(reply);
   });
 });
+
+describe('withSignature on a message started from a link', () => {
+  it('goes after the text the link supplied', () => {
+    expect(withSignature({ body: 'Hi there\n\n' }, 'Ada', { quoted: false })).toEqual({ body: 'Hi there\n\n-- \nAda\n' });
+    expect(withSignature({ body: '' }, 'Ada', { quoted: false })).toEqual({ body: '\n\n-- \nAda\n' });
+  });
+});

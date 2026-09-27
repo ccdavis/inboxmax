@@ -27,6 +27,17 @@ fn database_path(app: &tauri::App) -> anyhow::Result<PathBuf> {
     Ok(dir.join("inboxmax.db"))
 }
 
+/// A setting that only tests use (where downloads go, how often mail is
+/// checked, a file to write notifications to). Release builds ignore them,
+/// so nothing in the environment can quietly redirect or record mail.
+pub(crate) fn test_setting(name: &str) -> Option<std::ffi::OsString> {
+    if cfg!(debug_assertions) {
+        std::env::var_os(name)
+    } else {
+        None
+    }
+}
+
 /// The window's preferred size, in logical pixels.
 const PREFERRED_SIZE: (f64, f64) = (1200.0, 800.0);
 /// The most of the screen's work area the window takes at first.

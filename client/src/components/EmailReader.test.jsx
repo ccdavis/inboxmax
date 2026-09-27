@@ -46,6 +46,25 @@ describe('EmailReader', () => {
     }
   });
 
+  it('leaves the email as it is when the page around it changes', async () => {
+    api.getEmail.mockResolvedValue({
+      uid: 3,
+      subject: 'Links',
+      from: [],
+      to: [],
+      date: null,
+      body_html: '<p><a href="https://example.com">here</a></p>',
+      body_text: null,
+    });
+    const { rerender } = render(<EmailReader accountId="a" emailUid={3} onBack={() => {}} onWrite={() => {}} />);
+    const link = await screen.findByRole('link', { name: 'here' });
+    link.focus();
+    // A new onWrite each time, as the page gives it on every render.
+    rerender(<EmailReader accountId="a" emailUid={3} onBack={() => {}} onWrite={() => {}} />);
+    expect(link.isConnected).toBe(true);
+    expect(link).toHaveFocus();
+  });
+
   it('does not invent links for non-link content', async () => {
     api.getEmail.mockResolvedValue({
       uid: 2,

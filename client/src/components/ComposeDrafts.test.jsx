@@ -61,7 +61,7 @@ describe('drafts', () => {
     const { onSaveDraft, onClose } = renderCompose();
     type('Message', 'Unfinished');
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
-    expect(screen.queryByRole('group', { name: 'Discard this message?' })).toBeNull();
+    expect(screen.queryByRole('group', { name: /^Discard this message/ })).toBeNull();
     await waitFor(() => expect(onClose).toHaveBeenCalledWith({ draftSaved: true }));
     expect(onSaveDraft).toHaveBeenCalledWith(expect.objectContaining({ body: 'Unfinished' }));
   });
@@ -70,7 +70,9 @@ describe('drafts', () => {
     const { onClose } = renderCompose({ onSaveDraft: vi.fn().mockRejectedValue(new Error('The draft is too large to save')) });
     type('Message', 'Unfinished');
     fireEvent.keyDown(dialog(), { key: 'Escape' });
-    expect(await within(dialog()).findByText('Draft not saved: The draft is too large to save')).toBeInTheDocument();
+    // Shown, and said out loud.
+    expect(await within(dialog()).findByRole('alert')).toHaveTextContent('Draft not saved: The draft is too large to save');
+    expect(within(dialog()).getAllByText('Draft not saved: The draft is too large to save')).toHaveLength(2);
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByLabelText('Message')).toHaveValue('Unfinished');
   });
@@ -78,7 +80,7 @@ describe('drafts', () => {
   it('Discard deletes a saved draft after asking', async () => {
     const { onDeleteDraft, onClose } = renderCompose({ fromDraft: true, initial: { body: 'Saved earlier' } });
     fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
-    const question = screen.getByRole('group', { name: 'Discard this message?' });
+    const question = screen.getByRole('group', { name: /^Discard this message/ });
     expect(question).toHaveTextContent('Discard this message and delete its draft?');
     fireEvent.click(within(question).getByRole('button', { name: 'Discard' }));
     await waitFor(() => expect(onClose).toHaveBeenCalledWith({ draftSaved: false }));
@@ -92,7 +94,7 @@ describe('drafts', () => {
       onDeleteDraft: vi.fn().mockRejectedValue(new Error('offline')),
     });
     fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
-    fireEvent.click(within(screen.getByRole('group', { name: 'Discard this message?' })).getByRole('button', { name: 'Discard' }));
+    fireEvent.click(within(screen.getByRole('group', { name: /^Discard this message/ })).getByRole('button', { name: 'Discard' }));
     expect(await within(dialog()).findByRole('alert')).toHaveTextContent('Could not delete the draft: offline');
     expect(onClose).not.toHaveBeenCalled();
   });

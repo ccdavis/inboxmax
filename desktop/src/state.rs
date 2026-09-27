@@ -28,6 +28,9 @@ pub struct DesktopState {
     saved_emails: RwLock<HashSet<String>>,
     /// Becomes true once saved passwords have been read.
     loaded: watch::Sender<bool>,
+    /// Message-IDs the user just put back in an inbox (Undo, Move to
+    /// Inbox): back under new UIDs, but not new mail.
+    pub restored: std::sync::Mutex<HashSet<String>>,
 }
 
 /// Run a (blocking, possibly prompting) credential-store call off the async runtime.
@@ -63,6 +66,7 @@ impl DesktopState {
             saved,
             saved_emails: RwLock::new(HashSet::new()),
             loaded: watch::channel(false).0,
+            restored: std::sync::Mutex::default(),
         })
     }
 

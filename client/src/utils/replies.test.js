@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  forwardDraft, forwardSubject, hasOtherRecipients, htmlToText, replyDraft, replySubject,
+  forwardDraft, forwardSubject, hasOtherRecipients, htmlToText, mailtoDraft, replyDraft, replySubject,
 } from './replies';
 
 const ME = 'me@example.com';
@@ -113,5 +113,37 @@ describe('htmlToText', () => {
     expect(htmlToText(html)).toBe(
       'Title\n\nRead the docs (https://x.example/doc) or https://x.example.\nNext line\n\n- One\n- Two',
     );
+  });
+});
+
+describe('mailtoDraft', () => {
+  it('fills in the address, and any subject, body, cc and bcc', () => {
+    expect(mailtoDraft('mailto:sarah@acme.example?subject=Lunch%20plans&body=Hi%2C%0D%0Anoon%3F&cc=bob@acme.example')).toEqual({
+      to: [{ name: null, email: 'sarah@acme.example' }],
+      cc: [{ name: null, email: 'bob@acme.example' }],
+      bcc: [],
+      pending: { to: '', cc: '', bcc: '' },
+      subject: 'Lunch plans',
+      body: 'Hi,\nnoon?',
+      focus: 'body',
+    });
+  });
+
+  it('keeps "+" and takes several addresses, leaving what it cannot read to fix', () => {
+    const draft = mailtoDraft('MAILTO:a+list@x.example,b@x.example?to=c@x.example&subject=a+b');
+    expect(draft.to.map((a) => a.email)).toEqual(['a+list@x.example', 'b@x.example', 'c@x.example']);
+    expect(draft.subject).toBe('a+b');
+    const odd = mailtoDraft('mailto:not-an-address?subject=%E0%A4%A');
+    expect(odd.to).toEqual([]);
+    expect(odd.pending.to).toBe('not-an-address');
+    expect(odd.subject).toBe('%E0%A4%A');
+    expect(odd.focus).toBe('to');
+  });
+});
+
+describe('replying to yourself under another tag', () => {
+  it('leaves out plus-addressed forms of your own address', () => {
+    const reply = replyDraft(message({ to: [{ name: null, email: 'Me+lists@Example.com' }, BOB], cc: [] }), { me: ME, all: true });
+    expect(reply.to.map((a) => a.email)).toEqual(['sarah@acme.example', 'bob@acme.example']);
   });
 });

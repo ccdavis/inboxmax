@@ -52,8 +52,10 @@ function Banner({ role, onDismiss, action, className, children }) {
  * passes no `onLogout` and `homeLink={false}`: it has no sign-in or landing page.
  *
  * `notice` is a problem to report; `status` is good news (such as a sent
- * message), optionally with a `statusAction` ({ label, onClick }) like Undo. `actions` sit in the header; `inert` shuts the page off while a
- * dialog is open over it.
+ * message), optionally with a `statusAction` ({ label, onClick }) like Undo,
+ * and a `statusKey` that changes with each one, so the same news twice is
+ * spoken twice. `actions` sit in the header; `inert` shuts the page off
+ * while a dialog is open over it.
  */
 export default function Layout({
   email,
@@ -62,6 +64,7 @@ export default function Layout({
   notice,
   onDismissNotice,
   status,
+  statusKey,
   statusAction,
   onDismissStatus,
   actions,
@@ -75,6 +78,22 @@ export default function Layout({
   const openButtonRef = useRef(null);
   const closeButtonRef = useRef(null);
   const wasOpenRef = useRef(false);
+
+  // Good news is spoken through a live region that is always on the page:
+  // screen readers often miss one that appears already holding its text,
+  // and never repeat text that has not changed ("Archived." twice). So it
+  // is emptied, then filled a moment later, for each new status.
+  const announcerRef = useRef(null);
+  useEffect(() => {
+    const announcer = announcerRef.current;
+    if (!announcer) return undefined;
+    announcer.textContent = '';
+    if (!status) return undefined;
+    const timer = setTimeout(() => {
+      announcer.textContent = status;
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [status, statusKey]);
 
   // Move focus into the drawer when it opens and back when it closes.
   useEffect(() => {
@@ -153,8 +172,9 @@ export default function Layout({
           {notice}
         </Banner>
       )}
+      <div ref={announcerRef} role="status" className="sr-only" />
       {status && (
-        <Banner role="status" onDismiss={onDismissStatus} action={statusAction} className="bg-accent-soft text-ink border-line">
+        <Banner onDismiss={onDismissStatus} action={statusAction} className="bg-accent-soft text-ink border-line">
           {status}
         </Banner>
       )}

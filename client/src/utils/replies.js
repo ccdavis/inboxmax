@@ -1,6 +1,6 @@
 // Drafts for replying to and forwarding a message, as the compose dialog's
 // `initial` value.
-import { formatAddress, withAddresses } from './addresses';
+import { formatAddress, parseAddresses, withAddresses } from './addresses';
 import { formatFullDate } from './dates';
 
 const REPLY_PREFIX = /^\s*re\s*:/i;
@@ -82,8 +82,16 @@ function threading(email) {
  * the sender set one. Your own address (`me`) is never a recipient; replying
  * to your own message goes to the people it was sent to.
  */
+/** An address without any "+tag" (me+lists@x.com is me@x.com), lowercased. */
+function mailbox(address) {
+  const lower = address.toLowerCase();
+  const at = lower.lastIndexOf('@');
+  if (at < 0) return lower;
+  return `${lower.slice(0, at).split('+')[0]}${lower.slice(at)}`;
+}
+
 export function replyDraft(email, { me, all = false }) {
-  const notMe = (address) => address.email.toLowerCase() !== me.toLowerCase();
+  const notMe = (address) => mailbox(address.email) !== mailbox(me);
   const sender = (email.reply_to?.length ? email.reply_to : email.from) ?? [];
   let to = sender.filter(notMe);
   const ownMessage = to.length === 0;
@@ -136,5 +144,44 @@ export function forwardDraft(email, { folder = null } = {}) {
     forward_uid: email.uid,
     forward_folder: folder,
     focus: 'to',
+  };
+}
+
+function decodePart(text) {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
+}
+
+/**
+ * A new message from a mailto: link (RFC 6068): its addresses, and any
+ * subject, body, cc or bcc it sets. Addresses that cannot be understood
+ * stay in the field as typed text. ("+" is kept as itself, as in a+b@x.)
+ */
+export function mailtoDraft(href) {
+  const rest = href.replace(/^mailto:/i, '');
+  const [path, query = ''] = rest.split('?', 2);
+  const params = {};
+  for (const pair of query.split('&')) {
+    const [key, value = ''] = pair.split('=', 2);
+    if (key) params[decodePart(key).toLowerCase()] ??= decodePart(value);
+  }
+  const field = (text) => {
+    const { addresses, invalid } = parseAddresses(text ?? '');
+    return { addresses, pending: invalid.join(', ') };
+  };
+  const to = field([decodePart(path), params.to].filter(Boolean).join(', '));
+  const cc = field(params.cc);
+  const bcc = field(params.bcc);
+  return {
+    to: to.addresses,
+    cc: cc.addresses,
+    bcc: bcc.addresses,
+    pending: { to: to.pending, cc: cc.pending, bcc: bcc.pending },
+    subject: params.subject ?? '',
+    body: (params.body ?? '').replace(/\r\n/g, '\n'),
+    focus: to.addresses.length ? 'body' : 'to',
   };
 }

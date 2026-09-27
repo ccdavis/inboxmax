@@ -116,10 +116,13 @@ describe('ComposeDialog', () => {
     type(to(), 'a@x.example');
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
     const question = screen.getByRole('group', { name: 'Send without a subject?' });
+    // The question takes focus, so it is read out.
+    expect(within(question).getByRole('button', { name: 'Add a subject' })).toHaveFocus();
     expect(onSend).not.toHaveBeenCalled();
 
     fireEvent.click(within(question).getByRole('button', { name: 'Add a subject' }));
     expect(screen.queryByRole('group', { name: 'Send without a subject?' })).toBeNull();
+    expect(screen.getByLabelText('Subject')).toHaveFocus();
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
     fireEvent.click(screen.getByRole('button', { name: 'Send anyway' }));
     await waitFor(() => expect(onSend).toHaveBeenCalledWith(expect.objectContaining({ subject: '' })));
@@ -169,10 +172,11 @@ describe('ComposeDialog', () => {
     const { onClose } = renderCompose();
     type(screen.getByLabelText('Message'), 'Half a thought');
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
-    const question = screen.getByRole('group', { name: 'Discard this message?' });
+    const question = screen.getByRole('group', { name: /^Discard this message/ });
     fireEvent.click(within(question).getByRole('button', { name: 'Keep editing' }));
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByLabelText('Message')).toHaveValue('Half a thought');
+    expect(screen.getByRole('button', { name: 'Discard' })).toHaveFocus();
 
     fireEvent.keyDown(dialog(), { key: 'Escape' });
     fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
@@ -264,7 +268,7 @@ describe('ComposeDialog', () => {
       attach(file('notes.txt', 'hello'));
       await waitFor(() => expect(attached()).not.toBeNull());
       fireEvent.keyDown(screen.getByRole('dialog', { name: 'New message' }), { key: 'Escape' });
-      expect(screen.getByRole('group', { name: 'Discard this message?' })).toBeInTheDocument();
+      expect(screen.getByRole('group', { name: /^Discard this message/ })).toBeInTheDocument();
       expect(onClose).not.toHaveBeenCalled();
     });
   });

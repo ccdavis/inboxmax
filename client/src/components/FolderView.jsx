@@ -1,16 +1,19 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import * as api from '../api';
 import Spinner from './Spinner';
 import { formatTime } from '../utils/dates';
 import { senderColor, senderInitial, senderName } from '../utils/senders';
 import { folderLabel, serverName } from '../utils/folders';
+import { focusRow } from '../utils/focus';
 
 /**
  * The newest messages in one of the server's folders, to look through.
  * Nothing here changes the folder: no marker, stars or moving from the
  * list. `folder` is { kind, name }; `onSelect(envelope)` opens one.
+ * `focusRequest` ({ uid }) puts focus on that row, or where it was, once
+ * the list has loaded; `onFocused` says it was done.
  */
-export default function FolderView({ accountId, folder, onSelect, onBack, reloadKey = 0 }) {
+export default function FolderView({ accountId, folder, onSelect, onBack, reloadKey = 0, focusRequest, onFocused }) {
   const [state, setState] = useState({ key: null, emails: [], error: null });
   const [refreshCount, setRefreshCount] = useState(0);
   const key = `${accountId}|${folder.kind}|${reloadKey}|${refreshCount}`;
@@ -30,6 +33,14 @@ export default function FolderView({ accountId, folder, onSelect, onBack, reload
     };
   }, [accountId, folder.kind, key]);
 
+  const listRef = useRef(null);
+  const headingRef = useRef(null);
+  useEffect(() => {
+    if (!focusRequest || loading) return;
+    focusRow(listRef.current, focusRequest.uid, headingRef.current);
+    onFocused?.();
+  }, [focusRequest, loading, onFocused]);
+
   const refresh = useCallback(() => setRefreshCount((n) => n + 1), []);
   const label = folderLabel(folder.kind);
   const alias = serverName(folder);
@@ -46,7 +57,7 @@ export default function FolderView({ accountId, folder, onSelect, onBack, reload
           >
             <span aria-hidden="true">&larr;</span> Inbox
           </button>
-          <h2 className="text-sm font-medium text-ink truncate" aria-live="polite">
+          <h2 ref={headingRef} tabIndex={-1} className="text-sm font-medium text-ink truncate focus:outline-none" aria-live="polite">
             {label}
             {alias && <span className="ml-1 font-normal text-ink-muted">({alias})</span>}
             {!loading && !state.error && (
@@ -71,7 +82,7 @@ export default function FolderView({ accountId, folder, onSelect, onBack, reload
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto bg-canvas">
+      <div ref={listRef} className="flex-1 overflow-y-auto bg-canvas">
         {state.error && !loading && (
           <div role="alert" className="m-4 bg-danger-bg text-danger-ink text-sm px-4 py-3 rounded-lg border border-danger-line">
             Could not open {label}: {state.error}

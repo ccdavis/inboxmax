@@ -54,29 +54,52 @@ static ARRIVAL: FakeMessage = FakeMessage {
         "New mail, just now",
     )
 };
-const ARRIVAL_UID: u32 = 1001;
+/// Above every generated message; each opening of the demo uses the next.
+const FIRST_ARRIVAL_UID: u32 = 1001;
 /// INBOXMAX_DEMO_ARRIVAL_SECONDS changes the wait, for tests.
 const ARRIVAL_DELAY_SECONDS: i64 = 60;
-static ARRIVES_AT: Mutex<Option<DateTime<Utc>>> = Mutex::new(None);
+
+/// The coming message: its UID and when it arrives.
+#[derive(Clone, Copy)]
+struct Arrival {
+    uid: u32,
+    at: DateTime<Utc>,
+}
+
+/// None until the demo is opened in this run of the app, so someone who
+/// once tried the demo is not told of "new mail" in it on every launch.
+static ARRIVAL_STATE: Mutex<Option<Arrival>> = Mutex::new(None);
+
+fn arrival_state() -> std::sync::MutexGuard<'static, Option<Arrival>> {
+    ARRIVAL_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn arrival_delay() -> Duration {
+    // Only test builds take the setting.
     let seconds = std::env::var("INBOXMAX_DEMO_ARRIVAL_SECONDS")
         .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(ARRIVAL_DELAY_SECONDS);
+        .filter(|_| cfg!(debug_assertions))
+        .and_then(|s| s.parse::<i64>().ok())
+        .map_or(ARRIVAL_DELAY_SECONDS, |s| s.clamp(0, 3600));
     Duration::seconds(seconds)
 }
 
-/// When the demo's new message arrives: a while after the demo was first
-/// looked at, or after it was last started over.
-fn arrives_at(restart: bool) -> DateTime<Utc> {
-    let mut at = ARRIVES_AT
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if restart {
-        *at = None;
-    }
-    *at.get_or_insert_with(|| Utc::now() + arrival_delay())
+/// The demo was (re)opened: a new message is on its way, under a UID of its
+/// own so that it is new mail even to someone who saw the last one.
+fn schedule_arrival() {
+    let mut state = arrival_state();
+    let uid = state.map_or(FIRST_ARRIVAL_UID, |previous| previous.uid + 1);
+    *state = Some(Arrival {
+        uid,
+        at: Utc::now() + arrival_delay(),
+    });
+}
+
+/// The demo's new message, once it has arrived.
+fn arrived(now: DateTime<Utc>) -> Option<Arrival> {
+    (*arrival_state()).filter(|arrival| arrival.at <= now)
 }
 
 type Mailbox = (&'static str, &'static str);
@@ -308,13 +331,13 @@ fn generate_all(credentials: &MailCredentials) -> Vec<Generated> {
             format!("{} ({domain})", message.from.0)
         }
     };
-    let arrived = demo.then(|| arrives_at(false)).filter(|at| *at <= now);
-    arrived
-        .map(|received| Generated {
-            uid: ARRIVAL_UID,
+    demo.then(|| arrived(now))
+        .flatten()
+        .map(|arrival| Generated {
+            uid: arrival.uid,
             message: &ARRIVAL,
             sender_name: sender_name(&ARRIVAL),
-            received,
+            received: arrival.at,
         })
         .into_iter()
         .chain(MESSAGES.iter().enumerate().map(|(i, message)| Generated {
@@ -462,8 +485,8 @@ fn addresses(mailboxes: &[Mailbox]) -> Vec<MailAddress> {
 /// seen, and a couple remembered. Everything the inbox does is then on show.
 pub async fn reset_demo(db: &SqlitePool, account_id: &str) -> AppResult<()> {
     forget_moves(DEMO_EMAIL);
-    // The new message is yet to come again.
-    arrives_at(true);
+    // A new message is on its way.
+    schedule_arrival();
     crate::drafts::delete_all(db, account_id).await?;
     let envelopes = envelopes(&MailCredentials {
         host: DEMO_HOST.into(),
@@ -1599,40 +1622,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_mail_arrives_in_the_demo_a_while_after_it_opens() {
-        let _demo = DEMO_TESTS.lock().await;
-        let demo = MailCredentials {
-            host: DEMO_HOST.into(),
-            port: 993,
-            email: DEMO_EMAIL.into(),
-            password: DEMO_PASSWORD.into(),
-        };
-        let uids = |credentials: &MailCredentials| -> Vec<u32> {
-            envelopes(credentials).iter().map(|e| e.uid).collect()
-        };
-        // Not yet: it comes a minute after the demo is first looked at.
-        arrives_at(true);
-        assert!(!uids(&demo).contains(&ARRIVAL_UID));
-
-        *ARRIVES_AT.lock().unwrap() = Some(Utc::now() - Duration::seconds(1));
-        let envelopes = envelopes(&demo);
-        assert_eq!(envelopes[0].uid, ARRIVAL_UID, "newest, above the rest");
-        assert_eq!(envelopes[0].subject, "New mail, just now");
-        assert_eq!(envelopes.len(), MESSAGES.len() + 1);
-        let email = FakeMailFetcher
-            .fetch_email(&demo, ARRIVAL_UID)
-            .await
-            .unwrap();
-        assert!(email.body_text.unwrap().contains("notification"));
-        // Only the demo gets it.
-        assert!(!uids(&credentials("pw")).contains(&ARRIVAL_UID));
-
-        // Starting the demo over makes it wait again.
-        arrives_at(true);
-        assert!(!uids(&demo).contains(&ARRIVAL_UID));
-    }
-
-    #[tokio::test]
     async fn a_forward_fetches_each_attachment_once_and_only_so_many() {
         let db = db().await;
         let account = connected("dedupe@example.com");
@@ -1673,5 +1662,46 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(too_many, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn new_mail_arrives_in_the_demo_a_while_after_it_is_opened() {
+        let _demo = DEMO_TESTS.lock().await;
+        let demo = MailCredentials {
+            host: DEMO_HOST.into(),
+            port: 993,
+            email: DEMO_EMAIL.into(),
+            password: DEMO_PASSWORD.into(),
+        };
+        let newest = |credentials: &MailCredentials| envelopes(credentials)[0].uid;
+        let arrive_now = || {
+            let mut state = arrival_state();
+            let arrival = state.as_mut().unwrap();
+            arrival.at = Utc::now() - Duration::seconds(1);
+            arrival.uid
+        };
+        // Nothing comes until the demo is opened in this run...
+        *arrival_state() = None;
+        assert_eq!(newest(&demo), 1000);
+        // ...then a minute later.
+        schedule_arrival();
+        assert_eq!(newest(&demo), 1000);
+        let first = arrive_now();
+        let listed = envelopes(&demo);
+        assert_eq!(listed[0].uid, first, "newest, above the rest");
+        assert_eq!(listed[0].subject, "New mail, just now");
+        assert_eq!(listed.len(), MESSAGES.len() + 1);
+        let email = FakeMailFetcher.fetch_email(&demo, first).await.unwrap();
+        assert!(email.body_text.unwrap().contains("notification"));
+        // Only the demo gets it.
+        assert_eq!(newest(&credentials("pw")), 1000);
+
+        // Opening the demo again sends another, new to anyone watching.
+        schedule_arrival();
+        assert_eq!(newest(&demo), 1000);
+        let second = arrive_now();
+        assert!(second > first);
+        assert_eq!(newest(&demo), second);
+        *arrival_state() = None;
     }
 }

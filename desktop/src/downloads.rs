@@ -34,12 +34,16 @@ pub async fn save_new(dir: &Path, filename: &str, data: &[u8]) -> AppResult<Path
             .await
         {
             Ok(mut file) => {
-                file.write_all(data)
-                    .await
-                    .and(file.flush().await)
-                    .map_err(|e| {
-                        AppError::Internal(anyhow::anyhow!("Could not save {filename}: {e}"))
-                    })?;
+                let written = file.write_all(data).await.and(file.flush().await);
+                drop(file);
+                if let Err(e) = written {
+                    // No half-written file left behind under the name.
+                    let _ = tokio::fs::remove_file(&path).await;
+                    return Err(AppError::Internal(anyhow::anyhow!(
+                        "Could not save {filename}: {e}"
+                    )));
+                }
+                mark_from_internet(&path).await;
                 return Ok(path);
             }
             Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
@@ -55,9 +59,35 @@ pub async fn save_new(dir: &Path, filename: &str, data: &[u8]) -> AppResult<Path
     )))
 }
 
+/// Mark a saved attachment as coming from the internet (the "Mark of the
+/// Web"), as browsers do, so Windows warns before running it and Office
+/// opens it in Protected View.
+async fn mark_from_internet(path: &Path) {
+    #[cfg(windows)]
+    {
+        let mut stream = path.as_os_str().to_owned();
+        stream.push(":Zone.Identifier");
+        // Zone 3 is the internet.
+        if let Err(e) = tokio::fs::write(&stream, "[ZoneTransfer]\r\nZoneId=3\r\n").await {
+            tracing::warn!("Could not mark {} as downloaded: {e}", path.display());
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = path;
+}
+
 /// Whether `path` is a file directly inside `dir`, so a request to show a
-/// file cannot point anywhere else.
+/// file cannot point anywhere else. The path is checked as written before
+/// the file system is asked anything, so a network path is never looked up.
 pub fn is_inside(dir: &Path, path: &Path) -> bool {
+    let named_inside = path.is_absolute()
+        && path.parent() == Some(dir)
+        && path
+            .file_name()
+            .is_some_and(|name| Path::new(name).components().count() == 1);
+    if !named_inside {
+        return false;
+    }
     match (dir.canonicalize(), path.canonicalize()) {
         (Ok(dir), Ok(path)) => path.is_file() && path.parent() == Some(dir.as_path()),
         _ => false,
@@ -133,6 +163,29 @@ mod tests {
         assert!(
             !is_inside(dir.0.join("..").as_path(), &path),
             "only directly inside"
+        );
+        // Written another way, it is refused without being looked up.
+        assert!(!is_inside(
+            &dir.0,
+            &dir.0.join("sub").join("..").join("_.._escape.txt")
+        ));
+        assert!(!is_inside(
+            &dir.0,
+            Path::new(r"\\attacker.example\share\x.txt")
+        ));
+        assert!(!is_inside(&dir.0, Path::new("_.._escape.txt")));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn saved_files_are_marked_as_downloaded() {
+        let dir = TempDir::new();
+        let path = save_new(&dir.0, "report.docm", b"x").await.unwrap();
+        let mut stream = path.as_os_str().to_owned();
+        stream.push(":Zone.Identifier");
+        assert_eq!(
+            std::fs::read_to_string(stream).unwrap(),
+            "[ZoneTransfer]\r\nZoneId=3\r\n"
         );
     }
 

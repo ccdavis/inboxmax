@@ -66,7 +66,7 @@ test('discarding a draft asks, then deletes it', async ({ page }) => {
 
   dialog = page.getByRole('dialog', { name: 'New message' });
   await dialog.getByRole('button', { name: 'Discard' }).click();
-  const question = dialog.getByRole('group', { name: 'Discard this message?' });
+  const question = dialog.getByRole('group', { name: /^Discard this message/ });
   await expect(question).toContainText('Discard this message and delete its draft?');
   await question.getByRole('button', { name: 'Discard' }).click();
   await expect(dialog).toBeHidden();

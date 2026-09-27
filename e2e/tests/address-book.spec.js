@@ -42,9 +42,10 @@ test('people whose mail you open are suggested, robots and you are not', async (
 
   const dialog = await openCompose(page);
   const list = await suggestionsFor(dialog, 'sar');
-  await expect(list.getByRole('option')).toHaveText(['Sarah Chen <sarah.chen@acme.example>']);
+  // Under the first name seen (the fake mailbox adds the domain to sender names).
+  await expect(list.getByRole('option')).toHaveText(['Sarah Chen (acme.example) <sarah.chen@acme.example>']);
   await dialog.getByRole('combobox', { name: 'To' }).press('Enter');
-  await expect(dialog.getByRole('list', { name: 'To recipients' })).toHaveText('Sarah Chen <sarah.chen@acme.example>×');
+  await expect(dialog.getByRole('list', { name: 'To recipients' })).toHaveText('Sarah Chen (acme.example) <sarah.chen@acme.example>×');
 
   // GitHub's notification address and reply token, the calendar robot, and
   // this mailbox's own address are never suggested.

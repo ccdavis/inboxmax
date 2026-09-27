@@ -4,9 +4,11 @@
 
 use crate::state::DesktopState;
 use chrono::{Duration, Utc};
+use inboxmax_core::AppError;
 use inboxmax_core::imap_client::{EmailEnvelope, MailboxSnapshot};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Write;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
@@ -16,10 +18,14 @@ const CHECK_SECONDS: u64 = 120;
 /// Senders named in a notification about several messages.
 const NAMED_SENDERS: usize = 2;
 
-/// What has been seen of each mailbox: its UIDVALIDITY and newest UID.
+/// What has been seen of each mailbox: its UIDVALIDITY and newest UID; and
+/// the mailboxes whose server refused their password, so it is not tried
+/// again and again (which can lock an account) until the user reconnects.
 #[derive(Default)]
 pub struct Watcher {
     newest: HashMap<String, (Option<u32>, u32)>,
+    /// Account id to a hash of the refused password.
+    refused: HashMap<String, u64>,
 }
 
 impl Watcher {
@@ -54,7 +60,38 @@ impl Watcher {
     /// Stop following mailboxes that are no longer open.
     pub fn retain(&mut self, open: &[String]) {
         self.newest.retain(|id, _| open.contains(id));
+        self.refused.retain(|id, _| open.contains(id));
     }
+
+    /// Note that the server refused this password for the mailbox.
+    pub fn refused(&mut self, account_id: &str, password: &str) {
+        self.refused
+            .insert(account_id.to_string(), password_hash(password));
+    }
+
+    /// Whether to check the mailbox: not while the password its server
+    /// refused is still the one in use.
+    pub fn may_check(&self, account_id: &str, password: &str) -> bool {
+        self.refused.get(account_id) != Some(&password_hash(password))
+    }
+}
+
+fn password_hash(password: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    password.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// `arrived` without messages the user just put back in the inbox (they
+/// come back under new UIDs, but are not new mail); those are forgotten.
+pub fn without_restored(
+    arrived: Vec<EmailEnvelope>,
+    restored: &mut HashSet<String>,
+) -> Vec<EmailEnvelope> {
+    arrived
+        .into_iter()
+        .filter(|e| !e.message_id.as_ref().is_some_and(|id| restored.remove(id)))
+        .collect()
 }
 
 fn sender(envelope: &EmailEnvelope) -> &str {
@@ -113,9 +150,8 @@ struct NewMail {
 }
 
 fn check_interval() -> std::time::Duration {
-    let seconds = std::env::var("INBOXMAX_CHECK_SECONDS")
-        .ok()
-        .and_then(|s| s.parse().ok())
+    let seconds = crate::test_setting("INBOXMAX_CHECK_SECONDS")
+        .and_then(|s| s.to_str()?.parse().ok())
         .filter(|&s| s > 0)
         .unwrap_or(CHECK_SECONDS);
     std::time::Duration::from_secs(seconds)
@@ -130,7 +166,7 @@ fn window_in_use(app: &AppHandle) -> bool {
 
 fn notify(app: &AppHandle, title: &str, body: &str) {
     // Tests read notifications from a file instead of the screen.
-    if let Some(path) = std::env::var_os("INBOXMAX_NOTIFICATION_LOG") {
+    if let Some(path) = crate::test_setting("INBOXMAX_NOTIFICATION_LOG") {
         let written = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -164,19 +200,34 @@ async fn check_all(app: &AppHandle, watcher: &mut Watcher) {
     // New mail is the newest mail: a day back is plenty.
     let since = (Utc::now() - Duration::days(1)).date_naive();
     for account in &accounts {
+        if !watcher.may_check(&account.id, &account.password) {
+            continue;
+        }
         let snapshot = match state
             .mail
             .fetch_envelopes(&account.mail_credentials(), since)
             .await
         {
             Ok(snapshot) => snapshot,
+            Err(AppError::MailAuth(e)) => {
+                // The page reports it when the mailbox is next used.
+                tracing::info!("Stopped checking {} for new mail: {e}", account.email);
+                watcher.refused(&account.id, &account.password);
+                continue;
+            }
             Err(e) => {
-                // Offline or refused: try again next time.
+                // Offline, say: try again next time.
                 tracing::debug!("Could not check {} for new mail: {e}", account.email);
                 continue;
             }
         };
-        let arrived = watcher.check(&account.id, &snapshot);
+        let arrived = without_restored(
+            watcher.check(&account.id, &snapshot),
+            &mut state
+                .restored
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
         if arrived.is_empty() {
             continue;
         }
@@ -260,6 +311,31 @@ mod tests {
         // An empty inbox that then gets mail.
         assert!(watcher.check("empty", &snapshot(&[], 1)).is_empty());
         assert_eq!(uids(&watcher.check("empty", &snapshot(&[1], 1))), [1]);
+    }
+
+    #[test]
+    fn a_refused_password_is_not_tried_again_until_it_changes() {
+        let mut watcher = Watcher::default();
+        assert!(watcher.may_check("work", "old"));
+        watcher.refused("work", "old");
+        assert!(!watcher.may_check("work", "old"));
+        assert!(watcher.may_check("work", "new"), "reconnected");
+        assert!(watcher.may_check("home", "old"));
+        // Closing the mailbox forgets it.
+        watcher.retain(&[]);
+        assert!(watcher.may_check("work", "old"));
+    }
+
+    #[test]
+    fn mail_put_back_in_the_inbox_is_not_new() {
+        let mut arrived = vec![envelope(7, "A", "Back"), envelope(8, "B", "New")];
+        arrived[0].message_id = Some("back@x".into());
+        arrived[1].message_id = Some("new@x".into());
+        let mut restored = HashSet::from(["back@x".to_string()]);
+        assert_eq!(uids(&without_restored(arrived.clone(), &mut restored)), [8]);
+        // Only the once: moved out and back in again later, it is noticed.
+        assert!(restored.is_empty());
+        assert_eq!(uids(&without_restored(arrived, &mut restored)), [7, 8]);
     }
 
     #[test]

@@ -106,12 +106,12 @@ test('an empty message just closes; Discard asks before throwing a written one a
   let dialog = await openCompose(page);
   await page.keyboard.press('Escape');
   await expect(dialog).toBeHidden();
-  await expect(page.getByRole('status')).toHaveCount(0);
+  await expect(page.getByRole('status')).toBeEmpty();
 
   dialog = await openCompose(page);
   await dialog.getByLabel('Message').fill('Unfinished');
   await dialog.getByRole('button', { name: 'Discard' }).click();
-  const question = dialog.getByRole('group', { name: 'Discard this message?' });
+  const question = dialog.getByRole('group', { name: /^Discard this message/ });
   await question.getByRole('button', { name: 'Keep editing' }).click();
   await expect(dialog.getByLabel('Message')).toHaveValue('Unfinished');
 
@@ -120,7 +120,7 @@ test('an empty message just closes; Discard asks before throwing a written one a
   expect(await composeButton.evaluate((button) => button.closest('[inert]') !== null)).toBe(true);
 
   await dialog.getByRole('button', { name: 'Discard' }).click();
-  await dialog.getByRole('group', { name: 'Discard this message?' }).getByRole('button', { name: 'Discard' }).click();
+  await dialog.getByRole('group', { name: /^Discard this message/ }).getByRole('button', { name: 'Discard' }).click();
   await expect(dialog).toBeHidden();
   await expect(page.getByRole('button', { name: /Compose/ })).toBeVisible();
   // Nothing sent, and no draft left behind.

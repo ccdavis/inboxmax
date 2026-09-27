@@ -2,6 +2,7 @@ import { useRef, useEffect } from 'react';
 import EmailRow from './EmailRow';
 import Spinner from './Spinner';
 import { isToday } from '../utils/dates';
+import { focusRow } from '../utils/focus';
 
 const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
 
@@ -45,6 +46,8 @@ export default function EmailList({
   refreshing,
   error,
   lastOpen,
+  focusRequest,
+  onFocused,
   onSelectEmail,
   isRemembered,
   onToggleRemember,
@@ -105,6 +108,15 @@ export default function EmailList({
   );
 
   const listRef = useRef(null);
+  const headingRef = useRef(null);
+
+  // Put focus where it was asked for (back from a message, or after one
+  // left the list), once.
+  useEffect(() => {
+    if (!focusRequest) return;
+    focusRow(listRef.current, focusRequest.uid, headingRef.current);
+    onFocused?.();
+  }, [focusRequest, onFocused]);
 
   // Keep the last-seen marker in view when it moves.
   useEffect(() => {
@@ -164,7 +176,7 @@ export default function EmailList({
     <div className="flex flex-col h-full">
       <div className="px-4 py-2 min-h-12 border-b border-line bg-canvas flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
-          <h2 className="text-sm font-medium text-ink-muted truncate" aria-live="polite">{headerText}</h2>
+          <h2 ref={headingRef} tabIndex={-1} className="text-sm font-medium text-ink-muted truncate focus:outline-none" aria-live="polite">{headerText}</h2>
           {refreshing && <Spinner size="sm" label="Refreshing" />}
         </div>
         <div className="flex items-center gap-1 shrink-0">

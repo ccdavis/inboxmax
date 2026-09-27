@@ -43,6 +43,7 @@ function keyed(attachments = []) {
  * `onSend(request)` sends and resolves to the receipt; `onSent(receipt,
  * request)` follows. `onClose({ draftSaved })` says whether a draft remains.
  * `suggestContacts(query)` resolves to address-book entries to suggest.
+ * `warnBeforeLeaving` asks before the page is left with unsaved writing.
  */
 export default function ComposeDialog({
   from,
@@ -56,6 +57,7 @@ export default function ComposeDialog({
   onSent,
   onClose,
   suggestContacts,
+  warnBeforeLeaving = false,
 }) {
   const subjectId = useId();
   const bodyId = useId();
@@ -84,6 +86,27 @@ export default function ComposeDialog({
   const [draftState, setDraftState] = useState(null);
   const inputs = { to: useRef(null), cc: useRef(null), bcc: useRef(null) };
   const bodyRef = useRef(null);
+  const subjectRef = useRef(null);
+  const discardRef = useRef(null);
+  const promptRef = useRef(null);
+  const promptId = useId();
+  // Where focus goes once the open question is answered.
+  const afterPrompt = useRef(null);
+
+  useEffect(() => {
+    if (confirming) {
+      promptRef.current?.querySelector('button')?.focus();
+    } else {
+      afterPrompt.current?.current?.focus();
+      afterPrompt.current = null;
+    }
+  }, [confirming]);
+
+  /** Put the question away and focus `ref`'s element. */
+  const answer = (ref) => {
+    afterPrompt.current = ref;
+    setConfirming(null);
+  };
 
   // What the form holds, cheaply comparable (attachments by key, not data).
   const signature = JSON.stringify({ fields, subject, body, files: files.map((f) => f.key) });
@@ -147,6 +170,19 @@ export default function ComposeDialog({
     return attempt;
   }, [onSaveDraft, signature]);
 
+  // Leaving the page with something unsaved: save it, and let the browser
+  // ask first. (The desktop app's window has no such question.)
+  useEffect(() => {
+    if (!warnBeforeLeaving || !onSaveDraft || !unsaved) return undefined;
+    const warn = (e) => {
+      saveDraft();
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [warnBeforeLeaving, onSaveDraft, unsaved, saveDraft]);
+
   // Save a little while after each change.
   useEffect(() => {
     if (!onSaveDraft || !unsaved || busy) return undefined;
@@ -206,7 +242,7 @@ export default function ComposeDialog({
         await onDeleteDraft();
       } catch (caught) {
         sending.current = false;
-        setConfirming(null);
+        answer(discardRef);
         setError(`Could not delete the draft: ${caught.message}`);
         return;
       }
@@ -243,7 +279,7 @@ export default function ComposeDialog({
       setConfirming('no-subject');
       return;
     }
-    setConfirming(null);
+    if (confirming) answer(bodyRef);
     const request = {
       to: committed.to.addresses,
       cc: committed.cc.addresses,
@@ -286,7 +322,7 @@ export default function ComposeDialog({
     } else if (e.key === 'Escape' && !e.defaultPrevented) {
       // Escape answers an open question first; otherwise it closes.
       e.preventDefault();
-      if (confirming) setConfirming(null);
+      if (confirming) answer(confirming === 'discard' ? discardRef : subjectRef);
       else requestClose();
     }
   };
@@ -321,7 +357,8 @@ export default function ComposeDialog({
           if (e.dataTransfer?.types?.includes('Files')) e.preventDefault();
         }}
         onDrop={(e) => {
-          if (!e.dataTransfer?.files?.length) return;
+          // Not while sending: the message has already been put together.
+          if (!e.dataTransfer?.files?.length || busy) return;
           e.preventDefault();
           addFiles(e.dataTransfer.files);
         }}
@@ -352,6 +389,7 @@ export default function ComposeDialog({
             <label htmlFor={subjectId} className="w-12 shrink-0 text-sm text-ink-muted">Subject</label>
             <input
               id={subjectId}
+              ref={subjectRef}
               type="text"
               value={subject}
               onChange={(e) => setSubject(e.target.value)}
@@ -395,20 +433,24 @@ export default function ComposeDialog({
               {error}
             </p>
           )}
+          {draftState?.error && (
+            <p role="alert" className="sr-only">Draft not saved: {draftState.error}</p>
+          )}
+          {/* A question takes the focus (so it is read out) and gives it back. */}
           {confirming === 'discard' ? (
-            <div role="group" aria-label="Discard this message?" className="flex flex-wrap items-center justify-end gap-2">
-              <span className="mr-auto text-sm text-ink">
+            <div ref={promptRef} role="group" aria-labelledby={promptId} className="flex flex-wrap items-center justify-end gap-2">
+              <span id={promptId} className="mr-auto text-sm text-ink">
                 {hasDraft.current ? 'Discard this message and delete its draft?' : 'Discard this message?'}
               </span>
-              <button type="button" onClick={() => setConfirming(null)} className={SECONDARY_BUTTON}>Keep editing</button>
+              <button type="button" onClick={() => answer(discardRef)} className={SECONDARY_BUTTON}>Keep editing</button>
               <button type="button" onClick={discard} className="px-3 py-2 text-sm font-medium rounded-lg text-white bg-red-600 hover:bg-red-700 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500">
                 Discard
               </button>
             </div>
           ) : confirming === 'no-subject' ? (
-            <div role="group" aria-label="Send without a subject?" className="flex flex-wrap items-center justify-end gap-2">
-              <span className="mr-auto text-sm text-ink">Send without a subject?</span>
-              <button type="button" onClick={() => setConfirming(null)} className={SECONDARY_BUTTON}>Add a subject</button>
+            <div ref={promptRef} role="group" aria-labelledby={promptId} className="flex flex-wrap items-center justify-end gap-2">
+              <span id={promptId} className="mr-auto text-sm text-ink">Send without a subject?</span>
+              <button type="button" onClick={() => answer(subjectRef)} className={SECONDARY_BUTTON}>Add a subject</button>
               <button type="button" onClick={() => send({ allowEmptySubject: true })} disabled={busy} className={PRIMARY_BUTTON}>
                 Send anyway
               </button>
@@ -429,10 +471,11 @@ export default function ComposeDialog({
                   e.target.value = '';
                 }}
               />
-              <span className="mr-auto hidden text-xs text-ink-muted sm:inline" aria-live="polite">
+              {/* Saving is shown, not spoken: only a failed save is announced. */}
+              <span className={`mr-auto text-xs text-ink-muted ${draftNote ? '' : 'hidden sm:inline'}`}>
                 {draftNote ?? 'Ctrl+Enter to send'}
               </span>
-              <button type="button" onClick={requestDiscard} disabled={busy} className={SECONDARY_BUTTON}>Discard</button>
+              <button ref={discardRef} type="button" onClick={requestDiscard} disabled={busy} className={SECONDARY_BUTTON}>Discard</button>
               <button type="submit" disabled={busy} className={PRIMARY_BUTTON}>
                 {busy ? 'Sending…' : 'Send'}
               </button>

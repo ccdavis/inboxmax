@@ -59,6 +59,12 @@ function setVisibility(state) {
   document.dispatchEvent(new Event('visibilitychange'));
 }
 
+// Statuses are spoken through a live region that is filled a moment after
+// each one appears.
+async function expectStatus(text) {
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(text));
+}
+
 function renderInbox() {
   render(
     <MemoryRouter initialEntries={['/inbox']}>
@@ -242,14 +248,48 @@ describe('inbox page', () => {
       await screen.findByText('Thirty');
       fireEvent.click(screen.getByRole('button', { name: 'Delete “Thirty”' }));
 
-      expect(await screen.findByRole('status')).toHaveTextContent('Moved to Trash.');
+      await expectStatus('Moved to Trash.');
       expect(api.moveEmail).toHaveBeenCalledWith('work', 30, 'trash');
       expect(screen.queryByText('Thirty')).toBeNull();
 
       fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
-      expect(await screen.findByRole('status')).toHaveTextContent('Moved back to the inbox.');
+      await expectStatus('Moved back to the inbox.');
       expect(api.restoreEmail).toHaveBeenCalledWith('work', 'trash', 'thirty@x');
       expect(await screen.findByText('Thirty')).toBeInTheDocument();
+    });
+
+    it('keeps the keyboard in the list: on to the next row after a delete, back onto the message after Undo', async () => {
+      api.restoreEmail.mockResolvedValue({ uid: 30 });
+      renderInbox();
+      await screen.findByText('Thirty');
+      const remove = screen.getByRole('button', { name: 'Delete “Thirty”' });
+      remove.focus();
+      fireEvent.click(remove);
+      await waitFor(() => expect(screen.queryByText('Thirty')).toBeNull());
+      await waitFor(() => expect(document.activeElement).toHaveTextContent('Twelve'));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+      await waitFor(() => expect(document.activeElement).toHaveTextContent('Thirty'));
+    });
+
+    it('goes back onto the row of the message that was open', async () => {
+      api.getEmail.mockResolvedValue({ uid: 12, subject: 'Twelve', from: [], to: [], date: now, body_text: 'Hi', attachments: [] });
+      renderInbox();
+      fireEvent.click(await screen.findByText('Twelve'));
+      fireEvent.click(await screen.findByRole('button', { name: /Back to inbox/ }));
+      await waitFor(() => expect(document.activeElement).toHaveTextContent('Twelve'));
+    });
+
+    it("drops a mailbox's Undo on switching to another", async () => {
+      api.listAccounts.mockResolvedValue([WORK, HOME]);
+      renderInbox();
+      await screen.findByText('Thirty');
+      fireEvent.click(screen.getByRole('button', { name: 'Delete “Thirty”' }));
+      await expectStatus('Moved to Trash.');
+      const mailboxes = screen.getByRole('complementary');
+      await act(async () => within(mailboxes).getByRole('button', { name: 'home@example.com' }).click());
+      expect(screen.queryByRole('button', { name: 'Undo' })).toBeNull();
+      expect(screen.getByRole('status')).toBeEmptyDOMElement();
     });
 
     it('archives from the reader and returns to the list', async () => {
@@ -268,7 +308,7 @@ describe('inbox page', () => {
       await screen.findByRole('heading', { name: 'Twelve', level: 1 });
       fireEvent.click(screen.getByRole('button', { name: 'Archive' }));
 
-      expect(await screen.findByRole('status')).toHaveTextContent('Archived.');
+      await expectStatus('Archived.');
       expect(api.moveEmail).toHaveBeenCalledWith('work', 12, 'archive');
       expect(screen.queryByRole('heading', { name: 'Twelve', level: 1 })).toBeNull();
       expect(screen.getByText('Thirty')).toBeInTheDocument();
@@ -302,7 +342,7 @@ describe('inbox page', () => {
       renderInbox();
       await screen.findByText('Thirty');
       fireEvent.click(screen.getByRole('button', { name: 'Archive “Thirty”' }));
-      expect(await screen.findByRole('status')).toHaveTextContent('Archived.');
+      await expectStatus('Archived.');
       expect(screen.queryByRole('button', { name: 'Undo' })).toBeNull();
     });
 
@@ -341,7 +381,7 @@ describe('inbox page', () => {
       api.listDrafts.mockResolvedValue([{ ...DRAFT, subject: '', to: [] }]);
       fireEvent.keyDown(dialog, { key: 'Escape' });
 
-      expect(await screen.findByRole('status')).toHaveTextContent('Draft saved.');
+      await expectStatus('Draft saved.');
       expect(api.saveDraft).toHaveBeenCalledWith('work', expect.stringMatching(/^[0-9a-f-]{36}$/), expect.objectContaining({ body: 'Later' }));
       expect(await screen.findByRole('button', { name: 'No recipients: (no subject)' })).toBeInTheDocument();
     });
@@ -367,7 +407,7 @@ describe('inbox page', () => {
 
       fireEvent.click(within(dialog).getByRole('button', { name: 'Send' }));
 
-      expect(await screen.findByRole('status')).toHaveTextContent('Message sent to Sarah.');
+      await expectStatus('Message sent to Sarah.');
       expect(screen.queryByRole('dialog')).toBeNull();
       expect(api.sendEmail).toHaveBeenCalledWith('work', expect.objectContaining({
         to: [{ name: 'Sarah', email: 'sarah@acme.example' }],
@@ -383,7 +423,7 @@ describe('inbox page', () => {
       expect(await screen.findByRole('alert')).toHaveTextContent(
         'Message sent to a@x.example and 1 more, but no copy could be saved in your Sent folder.',
       );
-      expect(screen.queryByRole('status')).toBeNull();
+      expect(screen.getByRole('status')).toBeEmptyDOMElement();
     });
 
     it('keeps the draft open when sending fails', async () => {
@@ -419,7 +459,7 @@ describe('inbox page', () => {
       expect(field).toHaveValue('Ada\nAnalyst');
       fireEvent.change(field, { target: { value: 'Ada Lovelace  ' } });
       fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
-      expect(await screen.findByRole('status')).toHaveTextContent('Signature saved.');
+      await expectStatus('Signature saved.');
       expect(api.setSignature).toHaveBeenCalledWith('work', 'Ada Lovelace  ');
       expect(screen.queryByRole('dialog')).toBeNull();
 
@@ -450,6 +490,34 @@ describe('inbox page', () => {
       fireEvent.click(await screen.findByRole('button', { name: /^↩ Reply$|^Reply$/ }));
       const value = body(screen.getByRole('dialog', { name: 'Reply' })).value;
       expect(value).toMatch(/^\n\n-- \nAda\n\nOn .*B <b@example\.com> wrote:\n> Original words\n$/);
+    });
+
+    it('starts a message here from a mailto: link, signed below its text, and gives focus back after', async () => {
+      api.getSignature.mockResolvedValue({ signature: 'Ada' });
+      api.getEmail.mockResolvedValue({
+        uid: 30,
+        subject: 'Thirty',
+        from: [{ name: 'B', email: 'b@example.com' }],
+        to: [],
+        date: now,
+        body_html: '<p>Write to <a href="mailto:help@acme.example?subject=Help&amp;body=Hello">support</a></p>',
+        body_text: null,
+        attachments: [],
+      });
+      renderInbox();
+      fireEvent.click(await screen.findByText('Thirty'));
+      await waitFor(() => expect(api.getSignature).toHaveBeenCalled());
+      const link = await screen.findByRole('link', { name: 'support' });
+      link.focus();
+      fireEvent.click(link);
+      const dialog = screen.getByRole('dialog', { name: 'New message' });
+      expect(within(dialog).getByRole('list', { name: 'To recipients' })).toHaveTextContent('help@acme.example');
+      expect(within(dialog).getByLabelText('Subject')).toHaveValue('Help');
+      expect(within(dialog).getByLabelText('Message')).toHaveValue('Hello\n\n-- \nAda\n');
+      expect(api.openExternal).not.toHaveBeenCalled();
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+      await waitFor(() => expect(link).toHaveFocus());
     });
 
     it('keeps the dialog open and says why when saving fails', async () => {
@@ -594,7 +662,7 @@ describe('desktop app', () => {
     expect(within(dialog).getByLabelText('Message').value).toContain('> See the site (https://example.com/)');
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Send' }));
-    await screen.findByRole('status');
+    await expectStatus('Message sent');
     expect(api.sendEmail).toHaveBeenCalledWith('work', expect.objectContaining({
       in_reply_to: 'thirty@example.com',
       references: ['thirty@example.com'],

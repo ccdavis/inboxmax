@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import * as api from '../api';
 import Dialog from './Dialog';
 import Spinner from './Spinner';
@@ -13,13 +13,20 @@ const PRIMARY_BUTTON =
 
 function matches(contact, filter) {
   const needle = filter.trim().toLowerCase();
-  return !needle || contact.email.includes(needle) || (contact.name ?? '').toLowerCase().includes(needle);
+  return !needle || contact.email.toLowerCase().includes(needle) || (contact.name ?? '').toLowerCase().includes(needle);
 }
 
 function ContactRow({ contact, onRename, onDelete }) {
   const [draft, setDraft] = useState(null);
   const inputId = useId();
   const label = formatAddress(contact);
+  // Saving or cancelling a rename puts focus back on Edit.
+  const editRef = useRef(null);
+  const wasEditing = useRef(false);
+  useEffect(() => {
+    if (draft == null && wasEditing.current) editRef.current?.focus();
+    wasEditing.current = draft != null;
+  }, [draft]);
 
   if (draft != null) {
     const save = async (e) => {
@@ -67,7 +74,7 @@ function ContactRow({ contact, onRename, onDelete }) {
           sent {contact.times_sent}×
         </span>
       )}
-      <button type="button" onClick={() => setDraft(contact.name ?? '')} className={SMALL_BUTTON} aria-label={`Edit ${label}`}>
+      <button ref={editRef} type="button" onClick={() => setDraft(contact.name ?? '')} className={SMALL_BUTTON} aria-label={`Edit ${label}`}>
         Edit
       </button>
       <button type="button" onClick={() => onDelete(contact)} className={`${SMALL_BUTTON} hover:text-danger-ink`} aria-label={`Delete ${label}`}>
@@ -132,6 +139,20 @@ export default function AddressBookDialog({ onClose }) {
 
   const shown = (contacts ?? []).filter((contact) => matches(contact, filter));
 
+  const [spoken, setSpoken] = useState('');
+  const listRef = useRef(null);
+  const filterRef = useRef(null);
+  // The row whose place focus goes to once the list has reloaded.
+  const focusAfterDelete = useRef(null);
+  useEffect(() => {
+    const index = focusAfterDelete.current;
+    if (index == null) return;
+    focusAfterDelete.current = null;
+    const rows = listRef.current?.querySelectorAll('li') ?? [];
+    const row = rows[Math.min(index, rows.length - 1)];
+    (row?.querySelector('button') ?? filterRef.current)?.focus();
+  }, [contacts]);
+
   return (
     <Dialog title="Address book" onClose={onClose} className="sm:max-w-2xl">
       <form onSubmit={add} className="flex flex-wrap items-end gap-2 border-b border-line px-4 py-3">
@@ -160,6 +181,7 @@ export default function AddressBookDialog({ onClose }) {
         <label htmlFor={filterId} className="sr-only">Search the address book</label>
         <input
           id={filterId}
+          ref={filterRef}
           type="search"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
@@ -168,6 +190,7 @@ export default function AddressBookDialog({ onClose }) {
         />
       </div>
 
+      <p role="status" className="sr-only">{spoken}</p>
       {error && (
         <p role="alert" className="mx-4 mt-3 rounded-lg border border-danger-line bg-danger-bg px-3 py-2 text-sm text-danger-ink">
           {error}
@@ -178,13 +201,22 @@ export default function AddressBookDialog({ onClose }) {
         {contacts == null ? (
           <div className="flex justify-center py-8"><Spinner label="Loading the address book" /></div>
         ) : shown.length ? (
-          <ul aria-label="Contacts">
-            {shown.map((contact) => (
+          <ul ref={listRef} aria-label="Contacts">
+            {shown.map((contact, index) => (
               <ContactRow
                 key={contact.id}
                 contact={contact}
                 onRename={(c, name) => run(() => api.saveContact({ email: c.email, name }))}
-                onDelete={(c) => run(() => api.deleteContact(c.id))}
+                onDelete={async (c) => {
+                  // Its buttons go with it: focus moves on to the next one
+                  // (or the search) when the list has reloaded.
+                  focusAfterDelete.current = index;
+                  if (await run(() => api.deleteContact(c.id))) {
+                    setSpoken(`Deleted ${formatAddress(c)}`);
+                  } else {
+                    focusAfterDelete.current = null;
+                  }
+                }}
               />
             ))}
           </ul>

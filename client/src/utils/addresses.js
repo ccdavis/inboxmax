@@ -22,25 +22,53 @@ export function isEmailAddress(text) {
   return EMAIL.test(text);
 }
 
-/** Split on commas, semicolons, and line breaks outside quotes and <...>. */
-function splitAddressList(text) {
-  const parts = [];
-  let current = '';
+/**
+ * The positions of the commas, semicolons, and line breaks in `text` that
+ * separate addresses (those outside quotes and <...>), and whether the text
+ * ends inside a quote or <...>.
+ */
+function separators(text) {
+  const at = [];
   let quoted = false;
   let bracketed = false;
-  for (const char of text) {
+  [...text].forEach((char, index) => {
     if (char === '"' && !bracketed) quoted = !quoted;
     else if (char === '<' && !quoted) bracketed = true;
     else if (char === '>' && !quoted) bracketed = false;
-    if (!quoted && !bracketed && /[,;\n\r]/.test(char)) {
-      parts.push(current);
-      current = '';
-    } else {
-      current += char;
-    }
+    else if (!quoted && !bracketed && /[,;\n\r]/.test(char)) at.push(index);
+  });
+  return { at, open: quoted || bracketed };
+}
+
+/** Split on commas, semicolons, and line breaks outside quotes and <...>. */
+function splitAddressList(text) {
+  const chars = [...text];
+  const parts = [];
+  let start = 0;
+  for (const index of separators(text).at) {
+    parts.push(chars.slice(start, index).join(''));
+    start = index + 1;
   }
-  parts.push(current);
+  parts.push(chars.slice(start).join(''));
   return parts.map((part) => part.trim()).filter(Boolean);
+}
+
+/**
+ * Where typed recipient text can be cut into addresses: the text before its
+ * last separating comma (or semicolon, or line break) and the rest; null
+ * when there is none. A comma inside "Chen, Sarah" does not separate.
+ */
+export function splitAtLastSeparator(text) {
+  const { at } = separators(text);
+  if (!at.length) return null;
+  const chars = [...text];
+  const cut = at.at(-1);
+  return { before: chars.slice(0, cut).join(''), after: chars.slice(cut + 1).join('') };
+}
+
+/** Whether typed text ends inside a quoted name or an <address>. */
+export function endsInsideQuotes(text) {
+  return separators(text).open;
 }
 
 function parseOne(text) {

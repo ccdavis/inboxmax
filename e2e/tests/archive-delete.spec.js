@@ -88,3 +88,22 @@ test('undoing twice explains that the message is already back', async ({ page })
   await expect(page.getByRole('alert')).toHaveText('Could not undo: The message is no longer in Archive');
   await expect(row(page, SARAH)).toBeVisible();
 });
+
+test('the keyboard stays in the list after a delete, and comes back to the row after reading', async ({ page }) => {
+  await signUpWithMailbox(page);
+  const rows = page.getByRole('main').locator('li[data-uid]');
+  // A row reads: avatar initial, sender, subject, time.
+  const second = (await rows.nth(1).innerText()).split('\n')[2];
+  await rows.first().hover();
+  await rows.first().getByRole('button', { name: /^Delete/ }).focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('status')).toHaveText('Moved to Trash.');
+  // Focus is on the row that moved up into its place.
+  await expect(page.locator(':focus')).toContainText(second);
+
+  // Open that one from the keyboard, go back, and focus is on it again.
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText(second);
+  await page.getByRole('button', { name: /Back to inbox/ }).click();
+  await expect(page.locator(':focus')).toContainText(second);
+});
