@@ -121,6 +121,8 @@ pub fn run() {
             commands::restore_email,
             commands::save_attachment,
             commands::save_folder_attachment,
+            commands::get_signature,
+            commands::set_signature,
             commands::list_folders,
             commands::list_folder_emails,
             commands::get_folder_email,

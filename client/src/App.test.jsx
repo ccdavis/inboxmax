@@ -16,6 +16,8 @@ vi.mock('./api', () => ({
   connectDemo: vi.fn(),
   sendEmail: vi.fn(),
   listDrafts: vi.fn(),
+  getSignature: vi.fn(),
+  setSignature: vi.fn(),
   getDraft: vi.fn(),
   saveDraft: vi.fn(),
   deleteDraft: vi.fn(),
@@ -71,8 +73,7 @@ describe('inbox page', () => {
     api.listAccounts.mockResolvedValue([WORK]);
     api.listDrafts.mockResolvedValue([]);
     api.saveDraft.mockResolvedValue({});
-    api.listDrafts.mockResolvedValue([]);
-    api.saveDraft.mockResolvedValue({});
+    api.getSignature.mockResolvedValue({ signature: '' });
     api.getRemembered.mockResolvedValue([]);
     api.setWatermark.mockResolvedValue({ ok: true });
     api.getEmails.mockImplementation(async (accountId) => (
@@ -393,6 +394,80 @@ describe('inbox page', () => {
     });
   });
 
+  describe('signature', () => {
+    const body = (dialog) => within(dialog).getByLabelText('Message');
+
+    it('starts new messages with the mailbox signature, and a fresh one after editing it', async () => {
+      api.getSignature.mockResolvedValue({ signature: 'Ada\nAnalyst' });
+      api.setSignature.mockImplementation(async (_account, signature) => ({ signature: signature.trim() }));
+      renderInbox();
+      await screen.findByText('Thirty');
+      await waitFor(() => expect(api.getSignature).toHaveBeenCalledWith('work'));
+
+      fireEvent.click(screen.getByRole('button', { name: /Compose/ }));
+      let dialog = screen.getByRole('dialog', { name: 'New message' });
+      expect(body(dialog)).toHaveValue('\n\n-- \nAda\nAnalyst\n');
+      // Only a signature is nothing written: closing keeps no draft.
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      expect(api.saveDraft).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Signature' }));
+      dialog = screen.getByRole('dialog', { name: 'Signature' });
+      const field = within(dialog).getByRole('textbox');
+      expect(field).toHaveValue('Ada\nAnalyst');
+      fireEvent.change(field, { target: { value: 'Ada Lovelace  ' } });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+      expect(await screen.findByRole('status')).toHaveTextContent('Signature saved.');
+      expect(api.setSignature).toHaveBeenCalledWith('work', 'Ada Lovelace  ');
+      expect(screen.queryByRole('dialog')).toBeNull();
+
+      fireEvent.click(screen.getByRole('button', { name: /Compose/ }));
+      expect(body(screen.getByRole('dialog', { name: 'New message' }))).toHaveValue('\n\n-- \nAda Lovelace\n');
+    });
+
+    it('puts the signature above the quoted message in a reply', async () => {
+      api.getSignature.mockResolvedValue({ signature: 'Ada' });
+      api.getEmail.mockResolvedValue({
+        uid: 30,
+        subject: 'Thirty',
+        from: [{ name: 'B', email: 'b@example.com' }],
+        reply_to: [],
+        to: [{ name: null, email: 'work@example.com' }],
+        cc: [],
+        date: now,
+        received: now,
+        body_html: null,
+        body_text: 'Original words',
+        message_id: 'thirty@x',
+        references: [],
+        attachments: [],
+      });
+      renderInbox();
+      fireEvent.click(await screen.findByText('Thirty'));
+      await waitFor(() => expect(api.getSignature).toHaveBeenCalled());
+      fireEvent.click(await screen.findByRole('button', { name: /^↩ Reply$|^Reply$/ }));
+      const value = body(screen.getByRole('dialog', { name: 'Reply' })).value;
+      expect(value).toMatch(/^\n\n-- \nAda\n\nOn .*B <b@example\.com> wrote:\n> Original words\n$/);
+    });
+
+    it('keeps the dialog open and says why when saving fails', async () => {
+      api.setSignature.mockRejectedValue(new Error('A signature can be at most 2000 characters'));
+      renderInbox();
+      await screen.findByText('Thirty');
+      fireEvent.click(screen.getByRole('button', { name: 'Signature' }));
+      const dialog = screen.getByRole('dialog', { name: 'Signature' });
+      fireEvent.change(within(dialog).getByRole('textbox'), { target: { value: 'x' } });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent('Could not save the signature: A signature can be at most 2000 characters');
+
+      // Over the limit, Save is off before asking the server.
+      fireEvent.change(within(dialog).getByRole('textbox'), { target: { value: 'x'.repeat(2001) } });
+      expect(within(dialog).getByRole('button', { name: 'Save' })).toBeDisabled();
+      expect(dialog).toHaveTextContent('1 characters over the limit of 2000.');
+    });
+  });
+
   it('starts at the connect screen when there are no mailboxes', async () => {
     api.listAccounts.mockResolvedValue([]);
     renderInbox();
@@ -407,8 +482,7 @@ describe('desktop app', () => {
     desktop.enabled = true;
     api.getSession.mockResolvedValue({ logged_in: true, user: null, app: { can_save_passwords: true } });
     api.listAccounts.mockResolvedValue([WORK]);
-    api.listDrafts.mockResolvedValue([]);
-    api.saveDraft.mockResolvedValue({});
+    api.getSignature.mockResolvedValue({ signature: '' });
     api.listDrafts.mockResolvedValue([]);
     api.saveDraft.mockResolvedValue({});
     api.getRemembered.mockResolvedValue([]);

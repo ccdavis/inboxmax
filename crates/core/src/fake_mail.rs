@@ -428,7 +428,7 @@ pub async fn reset_demo(db: &SqlitePool, account_id: &str) -> AppResult<()> {
         .and_then(|e| e.date)
         .map(|oldest| (oldest - Duration::hours(1)).timestamp_millis());
     sqlx::query(
-        "UPDATE accounts SET uid_validity = ?, watermark_uid = ?, last_open = ? WHERE id = ?",
+        "UPDATE accounts SET uid_validity = ?, watermark_uid = ?, last_open = ?, signature = '' WHERE id = ?",
     )
     .bind(i64::from(UID_VALIDITY))
     .bind(i64::from(envelopes[DEMO_UNSEEN].uid))

@@ -14,6 +14,7 @@ pub mod fake_mail;
 pub mod imap_client;
 pub mod mailbox;
 pub mod outgoing;
+pub mod signature;
 mod smtp;
 
 pub use account::ConnectedAccount;

@@ -105,6 +105,18 @@ describe('Inbox Max desktop features', () => {
       await session.find('main li', { text: 'Team standup notes' });
     }));
 
+  it('keeps a signature and starts new messages with it', () =>
+    withApp(async (session) => {
+      await click(session, 'aside button', 'Signature');
+      await (await session.find('[role="dialog"] textarea')).type('Demo Person');
+      await click(session, '[role="dialog"] button[type="submit"]', 'Save');
+      await session.find('[role="status"]', { text: 'Signature saved.' });
+      await click(session, 'button', 'Compose');
+      await session.find('[role="dialog"] textarea');
+      const body = await session.execute('return document.querySelector("[role=dialog] textarea").value');
+      assert.equal(body, '\n\n-- \nDemo Person\n');
+    }));
+
   it('shows images on request, which the app security policy lets load', () =>
     withApp(async (session) => {
       await (await session.find('input[aria-label^="Search emails"]')).type('shipped\n');

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import * as api from '../api';
 import AddressBookDialog from './AddressBookDialog';
+import SignatureDialog from './SignatureDialog';
 import ComposeDialog from './ComposeDialog';
 import ConnectAccount from './ConnectAccount';
 import Layout from './Layout';
@@ -13,8 +14,10 @@ import { useAccounts } from '../hooks/useAccounts';
 import { useEmails } from '../hooks/useEmails';
 import { useRemembered } from '../hooks/useRemembered';
 import { useDrafts } from '../hooks/useDrafts';
+import { useSignature } from '../hooks/useSignature';
 import { forwardDraft, replyDraft } from '../utils/replies';
 import { newId } from '../utils/ids';
+import { withSignature } from '../utils/signature';
 
 const POLL_INTERVAL_MS = 2 * 60 * 1000;
 
@@ -59,6 +62,8 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
     error: rememberedError,
   } = useRemembered(accountId);
   const { drafts, refresh: refreshDrafts } = useDrafts(accountId);
+  const { signature, save: saveSignature } = useSignature(accountId);
+  const [signatureOpen, setSignatureOpen] = useState(false);
   const searchMode = searchQuery != null;
 
   // Load the inbox whenever a mailbox becomes readable.
@@ -199,11 +204,15 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
   const handleReply = (kind, email) => {
     setStatus(null);
     if (kind === 'forward') {
-      setCompose({ title: 'Forward', initial: forwardDraft(email, { folder: folder?.kind }), draftId: newId() });
+      setCompose({
+        title: 'Forward',
+        initial: withSignature(forwardDraft(email, { folder: folder?.kind }), signature),
+        draftId: newId(),
+      });
     } else {
       setCompose({
         title: kind === 'all' ? 'Reply all' : 'Reply',
-        initial: replyDraft(email, { me: active.email, all: kind === 'all' }),
+        initial: withSignature(replyDraft(email, { me: active.email, all: kind === 'all' }), signature),
         draftId: newId(),
       });
     }
@@ -371,7 +380,7 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
       type="button"
       onClick={() => {
         setStatus(null);
-        setCompose({ title: 'New message', initial: {}, draftId: newId() });
+        setCompose({ title: 'New message', initial: withSignature({}, signature), draftId: newId() });
       }}
       className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-500 px-3 py-1.5 text-sm font-medium text-white hover:from-indigo-600 hover:to-violet-600 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
     >
@@ -390,7 +399,7 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
       statusAction={status?.action}
       onDismissStatus={() => setStatus(null)}
       actions={composeButton}
-      inert={compose != null || addressBookOpen}
+      inert={compose != null || addressBookOpen || signatureOpen}
       sidebar={
         <SidePanel
           accounts={{
@@ -401,6 +410,7 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
             onRemove: handleRemove,
           }}
           onOpenAddressBook={() => setAddressBookOpen(true)}
+          onOpenSignature={() => setSignatureOpen(true)}
           drafts={drafts}
           onOpenDraft={handleOpenDraft}
           folders={{ accountId: active.id, activeKind: folder?.kind, onOpen: handleOpenFolder }}
@@ -492,6 +502,17 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
       />
     )}
     {addressBookOpen && <AddressBookDialog onClose={() => setAddressBookOpen(false)} />}
+    {signatureOpen && (
+      <SignatureDialog
+        email={active.email}
+        signature={signature}
+        onSave={async (text) => {
+          const saved = await saveSignature(text);
+          setStatus({ text: saved ? 'Signature saved.' : 'Signature removed.' });
+        }}
+        onClose={() => setSignatureOpen(false)}
+      />
+    )}
     </>
   );
 }

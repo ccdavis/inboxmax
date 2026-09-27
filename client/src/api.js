@@ -35,6 +35,11 @@ export const getDraft = (accountId, draftId) => transport.getDraft(accountId, dr
 export const saveDraft = (accountId, draftId, content) => transport.saveDraft(accountId, draftId, content);
 export const deleteDraft = (accountId, draftId) => transport.deleteDraft(accountId, draftId);
 
+/** The mailbox's signature, added when composing: resolves to { signature }. */
+export const getSignature = (accountId) => transport.getSignature(accountId);
+/** Save it (empty for none); resolves to { signature } as stored. */
+export const setSignature = (accountId, signature) => transport.setSignature(accountId, signature);
+
 // The server's own folders, read-only: [{ kind, name }], where `kind` is
 // 'sent', 'drafts', 'archive', 'trash' or 'junk' and `name` is what the
 // server calls it. Looking through a folder never marks its mail read.

@@ -11,6 +11,7 @@ use inboxmax_core::fake_mail::{self, DEMO_EMAIL, DEMO_HOST, DEMO_PASSWORD};
 use inboxmax_core::imap_client::{EmailEnvelope, Folder, FolderInfo, FullEmail};
 use inboxmax_core::mailbox::{self, EmailListResponse, RememberRequest, RememberedEmail, Restored};
 use inboxmax_core::outgoing::{SendReceipt, SendRequest};
+use inboxmax_core::signature::{self, Signature};
 use inboxmax_core::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
@@ -185,6 +186,25 @@ pub async fn get_folder_email(
 ) -> AppResult<FullEmail> {
     let account = state.require_account(&account_id).await?;
     mailbox::get_folder_email(state.mail.as_ref(), &account, folder, uid).await
+}
+
+#[tauri::command]
+pub async fn get_signature(
+    state: State<'_, DesktopState>,
+    account_id: String,
+) -> AppResult<Signature> {
+    let account = state.require_account(&account_id).await?;
+    signature::get(&state.db, &account.id).await
+}
+
+#[tauri::command]
+pub async fn set_signature(
+    state: State<'_, DesktopState>,
+    account_id: String,
+    signature: String,
+) -> AppResult<Signature> {
+    let account = state.require_account(&account_id).await?;
+    signature::set(&state.db, &account.id, &signature).await
 }
 
 #[tauri::command]

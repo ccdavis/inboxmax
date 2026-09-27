@@ -73,6 +73,8 @@ export const transport = {
     request(`${account(accountId)}/drafts/${encodeURIComponent(draftId)}`, json('PUT', { content })),
   deleteDraft: (accountId, draftId) =>
     request(`${account(accountId)}/drafts/${encodeURIComponent(draftId)}`, { method: 'DELETE' }),
+  getSignature: (accountId) => request(`${account(accountId)}/signature`),
+  setSignature: (accountId, signature) => request(`${account(accountId)}/signature`, json('PUT', { signature })),
   listFolders: (accountId) => request(`${account(accountId)}/folders`),
   getFolderEmails: (accountId, folder) => request(`${folderPath(accountId, folder)}/emails`),
   getFolderEmail: (accountId, folder, uid) =>

@@ -1113,3 +1113,55 @@ async fn sending_requires_a_signed_in_session() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert!(mail.sent.lock().unwrap().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Integration tests: signature
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_mailbox_signature_can_be_saved_and_read_back() {
+    let app = build_app(build_state(vec![]).await);
+    let uri = format!("/api/accounts/{ACCOUNT_ID}/signature");
+
+    let empty = app.clone().oneshot(emails_request(&uri)).await.unwrap();
+    assert_eq!(parse_response(empty).await["signature"], "");
+
+    let saved = app
+        .clone()
+        .oneshot(contacts_request(
+            "PUT",
+            &uri,
+            Some(serde_json::json!({ "signature": "Tess\r\nTest Team\n\n" })),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+    assert_eq!(parse_response(saved).await["signature"], "Tess\nTest Team");
+
+    let read = app.clone().oneshot(emails_request(&uri)).await.unwrap();
+    assert_eq!(parse_response(read).await["signature"], "Tess\nTest Team");
+
+    let too_long = app
+        .clone()
+        .oneshot(contacts_request(
+            "PUT",
+            &uri,
+            Some(serde_json::json!({ "signature": "x".repeat(2001) })),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(too_long.status(), StatusCode::BAD_REQUEST);
+
+    let signed_out = app
+        .oneshot(contacts_request(
+            "PUT",
+            &uri,
+            Some(serde_json::json!({ "signature": "Mallory" })),
+            false,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(signed_out.status(), StatusCode::UNAUTHORIZED);
+}
