@@ -45,11 +45,13 @@ describe('tauri transport', () => {
     await tauri.getEmails('a1');
     await tauri.rememberEmail('a1', 5, { subject: 'S' });
     await tauri.connectAccount({ email: 'a@example.com', password: 'pw', remember: false });
+    await tauri.connectDemo();
 
     expect(invoke.mock.calls).toEqual([
       ['list_emails', { accountId: 'a1', since: null }],
       ['remember_email', { accountId: 'a1', uid: 5, data: { subject: 'S' } }],
       ['connect_account', { request: { email: 'a@example.com', password: 'pw', remember: false } }],
+      ['connect_demo', undefined],
     ]);
   });
 

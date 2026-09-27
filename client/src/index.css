@@ -28,9 +28,17 @@
   --color-danger-ink: oklch(50.5% 0.213 27.518); /* red-700 */
   --color-danger-line: oklch(93.6% 0.032 17.717); /* red-100 */
 
-  /* Email list states: seen rows are quietly greyed out, the last-seen marker stands out. */
-  --color-seen: oklch(96.8% 0.007 247.896); /* slate-100 */
-  --color-seen-hover: oklch(92.9% 0.013 255.508); /* slate-200 */
+  /*
+   * Email list states. Seen rows are a clearly recessed grey band with
+   * washed-out text; the last-seen row is a solid highlight across the list,
+   * like a selected message, marking where new mail ends.
+   */
+  --color-seen: oklch(86.9% 0.022 252.894); /* slate-300 */
+  --color-seen-hover: oklch(82% 0.028 255); /* between slate-300 and slate-400 */
+  --color-seen-ink: oklch(44.6% 0.043 257.281); /* slate-600: AA on the band */
+  --color-marker-row: oklch(51.1% 0.262 276.966); /* indigo-600 */
+  --color-marker-row-hover: oklch(45.7% 0.24 277.023); /* indigo-700 */
+  --color-on-marker-row: oklch(100% 0 0); /* white */
   --color-marker: oklch(93% 0.034 272.788); /* indigo-100 */
   --color-marker-hover: oklch(87% 0.065 274.039); /* indigo-200 */
   --color-marker-line: oklch(67.3% 0.182 276.935); /* indigo-400 */
@@ -60,8 +68,13 @@
     --color-danger-ink: oklch(80.8% 0.114 19.571); /* red-300 */
     --color-danger-line: oklch(39.6% 0.141 25.723); /* red-900 */
 
-    --color-seen: oklch(20.8% 0.042 265.755); /* slate-900 */
-    --color-seen-hover: oklch(27.9% 0.041 260.031); /* slate-800 */
+    /* Seen rows are a lighter grey band than the near-black new rows. */
+    --color-seen: oklch(32% 0.043 258); /* between slate-800 and slate-700 */
+    --color-seen-hover: oklch(37.2% 0.044 257.287); /* slate-700 */
+    --color-seen-ink: oklch(75% 0.035 256); /* between slate-400 and slate-300: AA on the band */
+    --color-marker-row: oklch(51.1% 0.262 276.966); /* indigo-600 */
+    --color-marker-row-hover: oklch(45.7% 0.24 277.023); /* indigo-700 */
+    --color-on-marker-row: oklch(100% 0 0); /* white */
     --color-marker: oklch(25.7% 0.09 281.288); /* indigo-950 */
     --color-marker-hover: oklch(35.9% 0.144 278.697); /* indigo-900 */
     --color-marker-line: oklch(58.5% 0.233 277.117); /* indigo-500 */

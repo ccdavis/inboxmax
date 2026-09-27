@@ -15,6 +15,11 @@ What differs from the web app:
   in the macOS Keychain, Windows Credential Manager, or the Linux Secret Service
   (GNOME Keyring, KWallet). Saved mailboxes reconnect on launch. Without a usable
   keychain, passwords last until you quit.
+- **Demo mailbox.** "Try the demo mailbox" on the connect screen opens a generated
+  inbox with no account or password, set up as if last opened a couple of days
+  ago: some new mail above the highlighted last-seen email, older mail below it, and two
+  remembered emails. Choosing it again (from "+ Add mailbox") starts it over. It
+  stays in the mailbox list, reopens on launch, and can be removed like any other.
 - **Local data.** The database is `inboxmax.db` in the per-user app data directory
   (for example `~/.local/share/app.inboxmax.desktop` on Linux).
 - **Links** in emails open in your default browser (web and `mailto:` links only).

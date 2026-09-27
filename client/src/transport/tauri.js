@@ -28,6 +28,7 @@ export const transport = {
 
   listAccounts: () => call('list_accounts'),
   connectAccount: (request) => call('connect_account', { request }),
+  connectDemo: () => call('connect_demo'),
   removeAccount: (accountId) => call('remove_account', { accountId }),
 
   getEmails: (accountId, since) => call('list_emails', { accountId, since: since ?? null }),

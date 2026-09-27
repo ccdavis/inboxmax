@@ -37,14 +37,17 @@ pub struct RememberRequest {
 }
 
 /// Calculate the effective `since` timestamp for email listing: an explicit
-/// cursor wins, then a last-open time from the past week, else the last day.
+/// cursor wins; else, for a last visit in the past week, everything since then
+/// plus the day before it, so the mail already seen by then (the last-seen
+/// marker and what came before it) is still shown below the new mail. Else
+/// the last day.
 pub fn calculate_since_ms(param_since: Option<i64>, last_open: Option<i64>, now_ms: i64) -> i64 {
     param_since.unwrap_or_else(|| {
         if let Some(lo) = last_open
             && lo > 0
             && lo > now_ms - 7 * DAY_MS
         {
-            return lo;
+            return (lo - DAY_MS).max(now_ms - 7 * DAY_MS);
         }
         // First visit or stale: fetch the last 24 hours.
         now_ms - DAY_MS
@@ -267,7 +270,16 @@ mod tests {
             calculate_since_ms(Some(NOW - 5), Some(NOW - 1000), NOW),
             NOW - 5
         );
-        assert_eq!(calculate_since_ms(None, Some(NOW - 1000), NOW), NOW - 1000);
+        // A day before the last visit, for the mail already seen by then...
+        assert_eq!(
+            calculate_since_ms(None, Some(NOW - 1000), NOW),
+            NOW - 1000 - DAY_MS
+        );
+        // ...but never more than a week back.
+        assert_eq!(
+            calculate_since_ms(None, Some(NOW - 13 * DAY_MS / 2), NOW),
+            NOW - 7 * DAY_MS
+        );
         assert_eq!(
             calculate_since_ms(None, Some(NOW - 8 * DAY_MS), NOW),
             NOW - DAY_MS

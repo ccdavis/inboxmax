@@ -272,5 +272,36 @@ describe('useEmails', () => {
 
       expect(api.setWatermark).not.toHaveBeenCalled();
     });
+
+    it('keeps automatic updates on after the user chooses Mark all seen', async () => {
+      api.getEmails.mockResolvedValue(makeEmailResponse({ watermark_uid: 90 }));
+      const { result } = renderHook(() => useEmails(ACCOUNT));
+      await fetchEmails(result);
+      await act(async () => result.current.setWatermarkManually(95));
+
+      await act(async () => result.current.markAllSeenNow());
+      expect(result.current.watermarkUid).toBe(100);
+
+      // New mail arrives; leaving the page marks it seen as usual.
+      api.getEmails.mockResolvedValue(makeEmailResponse({
+        emails: [{ uid: 101, subject: 'Later', from: 'c@test.com', date: new Date().toISOString() }],
+        watermark_uid: 100,
+      }));
+      await fetchEmails(result);
+      await act(async () => result.current.markAllSeen());
+      expect(api.setWatermark).toHaveBeenLastCalledWith(ACCOUNT, 101);
+    });
+
+    it('resumes automatic updates after a reload', async () => {
+      api.getEmails.mockResolvedValue(makeEmailResponse({ watermark_uid: 90 }));
+      const { result } = renderHook(() => useEmails(ACCOUNT));
+      await fetchEmails(result);
+      await act(async () => result.current.setWatermarkManually(95));
+
+      await act(async () => result.current.reload());
+      await act(async () => result.current.markAllSeen());
+
+      expect(api.setWatermark).toHaveBeenLastCalledWith(ACCOUNT, 100);
+    });
   });
 });

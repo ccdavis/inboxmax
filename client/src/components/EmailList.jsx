@@ -18,9 +18,26 @@ function EmptyState({ title, children }) {
 }
 
 /**
+ * The line between new emails (above) and ones already seen (below), for
+ * when the last-seen email itself is not in the list to be highlighted.
+ */
+function SeenDivider() {
+  return (
+    <div role="separator" aria-label="Already seen: emails below this line" className="flex items-center gap-2 px-3 py-1.5 bg-canvas">
+      <span className="h-0.5 flex-1 rounded-full bg-marker-line" aria-hidden="true" />
+      <span className="shrink-0 rounded-full bg-marker px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-accent" aria-hidden="true">
+        Already seen
+      </span>
+      <span className="h-0.5 flex-1 rounded-full bg-marker-line" aria-hidden="true" />
+    </div>
+  );
+}
+
+/**
  * The main pane. For the inbox it shows every unseen email (UID above the
- * last-seen marker) plus the rest of today's; older seen emails are browsed
- * by day in the sidebar. In search mode it shows the results instead.
+ * last-seen marker), then the highlighted marker email and the rest of
+ * today's; older seen emails are browsed by day in the sidebar. In search
+ * mode it shows the results instead.
  */
 export default function EmailList({
   emails,
@@ -34,6 +51,7 @@ export default function EmailList({
   searchQuery,
   watermarkUid,
   onSetWatermark,
+  onMarkAllSeen,
   hideSeen,
   onToggleHideSeen,
   onRefresh,
@@ -42,14 +60,23 @@ export default function EmailList({
   const now = new Date();
   const isUnseen = (email) => watermarkUid == null || email.uid > watermarkUid;
 
+  // The marker email always shows, whatever its day, so the line does too.
   const baseEmails = searchMode
     ? emails
-    : emails.filter((email) => isUnseen(email) || isToday(email.date, now));
+    : emails.filter((email) => isUnseen(email) || isToday(email.date, now) || email.uid === watermarkUid);
   const earlierSeenCount = searchMode ? 0 : emails.length - baseEmails.length;
   const visibleEmails = !searchMode && hideSeen && watermarkUid != null
     ? baseEmails.filter((email) => email.uid >= watermarkUid)
     : baseEmails;
   const newCount = baseEmails.filter(isUnseen).length;
+  // The highlighted marker row is the line between new and seen. When that
+  // email is not in the list, a divider stands in for it: above the first
+  // seen row, or after the list if every row is new.
+  let dividerIndex = -1;
+  if (!searchMode && watermarkUid != null && !visibleEmails.some((email) => email.uid === watermarkUid)) {
+    dividerIndex = visibleEmails.findIndex((email) => !isUnseen(email));
+    if (dividerIndex === -1) dividerIndex = visibleEmails.length;
+  }
 
   let headerText;
   if (searchMode) {
@@ -61,6 +88,19 @@ export default function EmailList({
   } else {
     headerText = newCount === 0 ? 'No new emails' : `${newCount} new`;
   }
+
+  const renderRow = (email) => (
+    <EmailRow
+      key={email.uid}
+      email={email}
+      onClick={onSelectEmail}
+      isRemembered={isRemembered(email.uid)}
+      onToggleRemember={onToggleRemember}
+      isSeen={!isUnseen(email)}
+      isWatermark={email.uid === watermarkUid}
+      onSetWatermark={onSetWatermark}
+    />
+  );
 
   const listRef = useRef(null);
 
@@ -126,6 +166,15 @@ export default function EmailList({
           {refreshing && <Spinner size="sm" label="Refreshing" />}
         </div>
         <div className="flex items-center gap-1 shrink-0">
+          {!searchMode && newCount > 0 && (
+            <button
+              type="button"
+              onClick={() => onMarkAllSeen()}
+              className="text-xs px-2 py-1.5 rounded text-accent hover:text-accent-hover hover:bg-hover transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+            >
+              Mark all seen
+            </button>
+          )}
           {!searchMode && watermarkUid != null && (
             <button
               type="button"
@@ -182,22 +231,16 @@ export default function EmailList({
 
         {emptyState}
 
-        {!loading && visibleEmails.length > 0 && (
-          <ul>
-            {visibleEmails.map((email) => (
-              <EmailRow
-                key={email.uid}
-                email={email}
-                onClick={onSelectEmail}
-                isRemembered={isRemembered(email.uid)}
-                onToggleRemember={onToggleRemember}
-                isSeen={watermarkUid != null && email.uid < watermarkUid}
-                isWatermark={email.uid === watermarkUid}
-                onSetWatermark={onSetWatermark}
-              />
-            ))}
-          </ul>
-        )}
+        {!loading && visibleEmails.length > 0 && (dividerIndex === -1 ? (
+          <ul>{visibleEmails.map(renderRow)}</ul>
+        ) : (
+          // The divider sits between two lists so each list holds only emails.
+          <>
+            {dividerIndex > 0 && <ul>{visibleEmails.slice(0, dividerIndex).map(renderRow)}</ul>}
+            <SeenDivider />
+            {dividerIndex < visibleEmails.length && <ul>{visibleEmails.slice(dividerIndex).map(renderRow)}</ul>}
+          </>
+        ))}
 
         {!loading && earlierSeenCount > 0 && visibleEmails.length > 0 && (
           <p className="px-4 py-3 text-center text-xs text-ink-muted border-t border-line-subtle">

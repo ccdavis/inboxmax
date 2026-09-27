@@ -1,13 +1,38 @@
 //! An in-process mailbox with generated messages, for demos, development
-//! without an IMAP account, and end-to-end tests. Enabled with the
-//! `fake-mail` feature and selected at runtime by `INBOXMAX_FAKE_MAIL=1`.
+//! without an IMAP account, and end-to-end tests. The desktop app serves it
+//! to its demo account (see [`WithDemoMailbox`]); builds with the `fake-mail`
+//! feature also serve it to every account when `INBOXMAX_FAKE_MAIL=1`.
 
 use crate::error::{AppError, AppResult};
 use crate::imap_client::{EmailEnvelope, FullEmail, MailCredentials, MailFetcher, MailboxSnapshot};
+use crate::mailbox::{self, RememberRequest};
 use chrono::{Duration, NaiveDate, Utc};
+use sqlx::SqlitePool;
+use std::sync::Arc;
+
+/// The demo account, which people can open to try the app without a mail
+/// account. `.invalid` names are reserved (RFC 2606), so no real mailbox or
+/// IMAP server can have them.
+pub const DEMO_EMAIL: &str = "demo@inboxmax.invalid";
+pub const DEMO_HOST: &str = "demo.inboxmax.invalid";
+/// The demo mailbox accepts any password; this is the one the app uses.
+pub const DEMO_PASSWORD: &str = "demo";
+
+/// Whether an account is the demo account: both its address and its IMAP
+/// host, so a real address with a mistyped host is never taken for it.
+pub fn is_demo_account(email: &str, host: &str) -> bool {
+    email.eq_ignore_ascii_case(DEMO_EMAIL) && host.eq_ignore_ascii_case(DEMO_HOST)
+}
 
 /// Any password is accepted except this one, which simulates a rejected login.
 pub const REJECTED_PASSWORD: &str = "wrong-password";
+
+const UID_VALIDITY: u32 = 1;
+
+/// Where the demo starts: this many of the newest messages are unseen...
+const DEMO_UNSEEN: usize = 4;
+/// ...and these (by position, newest first) are remembered.
+const DEMO_REMEMBERED: [usize; 2] = [7, 8];
 
 const MESSAGES: &[(&str, &str)] = &[
     ("GitHub", "PR #47 merged: fix dashboard layout"),
@@ -25,11 +50,13 @@ const MESSAGES: &[(&str, &str)] = &[
 ];
 
 /// Every generated mailbox: one message every five hours, newest first.
-/// The mailbox login's domain is added to the senders so accounts differ.
+/// Outside the demo account, the mailbox login's domain is added to the
+/// senders so accounts differ.
 pub struct FakeMailFetcher;
 
 fn envelopes(credentials: &MailCredentials) -> Vec<EmailEnvelope> {
     let now = Utc::now();
+    let demo = is_demo_account(&credentials.email, &credentials.host);
     let domain = credentials
         .email
         .rsplit('@')
@@ -41,10 +68,104 @@ fn envelopes(credentials: &MailCredentials) -> Vec<EmailEnvelope> {
         .map(|(i, (from, subject))| EmailEnvelope {
             uid: 1000 - i as u32,
             subject: (*subject).to_string(),
-            from: format!("{from} ({domain})"),
+            from: if demo {
+                (*from).to_string()
+            } else {
+                format!("{from} ({domain})")
+            },
             date: Some(now - Duration::minutes(5 + i as i64 * 300)),
         })
         .collect()
+}
+
+/// Put a demo account in its starting state, as if it were last opened a
+/// couple of days ago: the newest few messages unseen, older ones already
+/// seen, and a couple remembered. Everything the inbox does is then on show.
+pub async fn reset_demo(db: &SqlitePool, account_id: &str) -> AppResult<()> {
+    let envelopes = envelopes(&MailCredentials {
+        host: DEMO_HOST.into(),
+        port: 993,
+        email: DEMO_EMAIL.into(),
+        password: DEMO_PASSWORD.into(),
+    });
+    // Just before the oldest message, so the whole mailbox is in the window.
+    let last_open = envelopes
+        .last()
+        .and_then(|e| e.date)
+        .map(|oldest| (oldest - Duration::hours(1)).timestamp_millis());
+    sqlx::query(
+        "UPDATE accounts SET uid_validity = ?, watermark_uid = ?, last_open = ? WHERE id = ?",
+    )
+    .bind(i64::from(UID_VALIDITY))
+    .bind(i64::from(envelopes[DEMO_UNSEEN].uid))
+    .bind(last_open)
+    .bind(account_id)
+    .execute(db)
+    .await?;
+
+    sqlx::query("DELETE FROM remembered WHERE account_id = ?")
+        .bind(account_id)
+        .execute(db)
+        .await?;
+    for envelope in DEMO_REMEMBERED.map(|i| &envelopes[i]) {
+        mailbox::remember(
+            db,
+            account_id,
+            i64::from(envelope.uid),
+            RememberRequest {
+                subject: Some(envelope.subject.clone()),
+                sender: Some(envelope.from.clone()),
+                date: envelope.date.map(|d| d.timestamp_millis()),
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Serves the demo mailbox to the demo account and passes every other
+/// account to the wrapped mail client. Only for the single-user desktop app:
+/// the demo accepts any password, so on the multi-user web server it would
+/// let anyone claim the demo address.
+pub struct WithDemoMailbox(pub Arc<dyn MailFetcher>);
+
+impl WithDemoMailbox {
+    fn pick(&self, credentials: &MailCredentials) -> &dyn MailFetcher {
+        if is_demo_account(&credentials.email, &credentials.host) {
+            &FakeMailFetcher
+        } else {
+            self.0.as_ref()
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl MailFetcher for WithDemoMailbox {
+    async fn fetch_envelopes(
+        &self,
+        credentials: &MailCredentials,
+        since: NaiveDate,
+    ) -> AppResult<MailboxSnapshot> {
+        self.pick(credentials)
+            .fetch_envelopes(credentials, since)
+            .await
+    }
+
+    async fn fetch_email(&self, credentials: &MailCredentials, uid: u32) -> AppResult<FullEmail> {
+        self.pick(credentials).fetch_email(credentials, uid).await
+    }
+
+    async fn search(
+        &self,
+        credentials: &MailCredentials,
+        query: &str,
+    ) -> AppResult<Vec<EmailEnvelope>> {
+        self.pick(credentials).search(credentials, query).await
+    }
+
+    async fn verify_credentials(&self, credentials: &MailCredentials) -> AppResult<()> {
+        self.pick(credentials).verify_credentials(credentials).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -60,7 +181,7 @@ impl MailFetcher for FakeMailFetcher {
             .collect();
         Ok(MailboxSnapshot {
             envelopes,
-            uid_validity: Some(1),
+            uid_validity: Some(UID_VALIDITY),
         })
     }
 
@@ -145,5 +266,113 @@ mod tests {
         );
         assert!(fake.fetch_email(&creds, 1).await.is_err());
         assert_eq!(fake.search(&creds, "INVOICE").await.unwrap().len(), 1);
+    }
+
+    /// Stands in for real IMAP: every call fails.
+    struct Unreachable;
+
+    #[async_trait::async_trait]
+    impl MailFetcher for Unreachable {
+        async fn fetch_envelopes(
+            &self,
+            _: &MailCredentials,
+            _: NaiveDate,
+        ) -> AppResult<MailboxSnapshot> {
+            Err(AppError::MailAuth("unreachable".into()))
+        }
+        async fn fetch_email(&self, _: &MailCredentials, _: u32) -> AppResult<FullEmail> {
+            Err(AppError::MailAuth("unreachable".into()))
+        }
+        async fn search(&self, _: &MailCredentials, _: &str) -> AppResult<Vec<EmailEnvelope>> {
+            Err(AppError::MailAuth("unreachable".into()))
+        }
+        async fn verify_credentials(&self, _: &MailCredentials) -> AppResult<()> {
+            Err(AppError::MailAuth("unreachable".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn only_the_demo_account_gets_the_demo_mailbox() {
+        let mail = WithDemoMailbox(Arc::new(Unreachable));
+        let demo = MailCredentials {
+            host: DEMO_HOST.into(),
+            port: 993,
+            email: DEMO_EMAIL.into(),
+            password: DEMO_PASSWORD.into(),
+        };
+        assert!(mail.verify_credentials(&demo).await.is_ok());
+        let week_ago = (Utc::now() - Duration::days(7)).date_naive();
+        let snapshot = mail.fetch_envelopes(&demo, week_ago).await.unwrap();
+        assert_eq!(snapshot.envelopes[0].from, "GitHub", "no domain suffix");
+
+        assert!(mail.verify_credentials(&credentials("pw")).await.is_err());
+        // The demo host alone does not make a real address the demo.
+        let real_address_on_demo_host = MailCredentials {
+            email: "me@example.com".into(),
+            ..demo
+        };
+        assert!(
+            mail.verify_credentials(&real_address_on_demo_host)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_demo_starts_with_new_seen_and_remembered_mail() {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::MIGRATOR.run(&db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, email, password_hash) VALUES ('u', 'u@example.com', '!')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let outcome = crate::account::connect_account(
+            &db,
+            &FakeMailFetcher,
+            "u",
+            crate::account::ConnectRequest {
+                email: DEMO_EMAIL.into(),
+                password: DEMO_PASSWORD.into(),
+                imap_host: Some(DEMO_HOST.into()),
+                imap_port: None,
+            },
+        )
+        .await
+        .unwrap();
+        let account = outcome.account;
+
+        // Moving the marker and forgetting are undone by a reset.
+        reset_demo(&db, &account.id).await.unwrap();
+        mailbox::set_watermark(&db, &account, 1000).await.unwrap();
+        mailbox::forget(&db, &account.id, 993).await.unwrap();
+        reset_demo(&db, &account.id).await.unwrap();
+
+        let inbox = mailbox::list_emails(&db, &FakeMailFetcher, &account, None)
+            .await
+            .unwrap();
+        assert_eq!(inbox.emails.len(), MESSAGES.len(), "whole mailbox in view");
+        let watermark = inbox.watermark_uid.unwrap();
+        let unseen = inbox.emails.iter().filter(|e| i64::from(e.uid) > watermark);
+        assert_eq!(unseen.count(), DEMO_UNSEEN);
+
+        let remembered = mailbox::list_remembered(&db, &account.id).await.unwrap();
+        let mut subjects: Vec<_> = remembered
+            .iter()
+            .filter_map(|r| r.subject.as_deref())
+            .collect();
+        subjects.sort_unstable();
+        assert_eq!(
+            subjects,
+            [
+                "Apartment lease renewal",
+                "Flight confirmation - SFO to JFK"
+            ]
+        );
     }
 }

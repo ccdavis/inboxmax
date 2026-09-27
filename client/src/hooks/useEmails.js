@@ -137,6 +137,22 @@ export function useEmails(accountKey) {
     return persistWatermark(newest);
   }, [persistWatermark]);
 
+  /**
+   * The user chose "Mark all seen". Unlike placing the marker by hand, this
+   * leaves automatic updates on, so mail that arrives later is marked seen
+   * when the page is left.
+   */
+  const markAllSeenNow = useCallback(() => {
+    manualWatermarkRef.current = false;
+    return markAllSeen();
+  }, [markAllSeen]);
+
+  /** Reload after the mailbox's state was reset elsewhere (the demo starting over). */
+  const reload = useCallback(() => {
+    manualWatermarkRef.current = false;
+    return fetchEmails();
+  }, [fetchEmails]);
+
   const search = useCallback(async (query) => {
     const requestId = ++searchRequestRef.current;
     setSearchLoading(true);
@@ -178,8 +194,10 @@ export function useEmails(accountKey) {
     lastOpen,
     watermarkUid,
     fetchEmails,
+    reload,
     setWatermarkManually,
     markAllSeen,
+    markAllSeenNow,
     searchResults,
     searchLoading,
     searchError,
