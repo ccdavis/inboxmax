@@ -41,6 +41,44 @@ const DEMO_UNSEEN: usize = 4;
 /// ...and these (by position, newest first) are remembered.
 const DEMO_REMEMBERED: [usize; 2] = [7, 8];
 
+/// A message that arrives in the demo inbox a minute after the demo opens,
+/// so new mail coming in (and the desktop's notification of it) can be seen.
+static ARRIVAL: FakeMessage = FakeMessage {
+    text: Some(
+        "This message arrived while the demo was open. When new mail comes in \
+         and Inbox Max is not the window you are using, the desktop app says so \
+         with a notification.",
+    ),
+    ..message(
+        ("Inbox Max", "hello@inboxmax.invalid"),
+        "New mail, just now",
+    )
+};
+const ARRIVAL_UID: u32 = 1001;
+/// INBOXMAX_DEMO_ARRIVAL_SECONDS changes the wait, for tests.
+const ARRIVAL_DELAY_SECONDS: i64 = 60;
+static ARRIVES_AT: Mutex<Option<DateTime<Utc>>> = Mutex::new(None);
+
+fn arrival_delay() -> Duration {
+    let seconds = std::env::var("INBOXMAX_DEMO_ARRIVAL_SECONDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(ARRIVAL_DELAY_SECONDS);
+    Duration::seconds(seconds)
+}
+
+/// When the demo's new message arrives: a while after the demo was first
+/// looked at, or after it was last started over.
+fn arrives_at(restart: bool) -> DateTime<Utc> {
+    let mut at = ARRIVES_AT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if restart {
+        *at = None;
+    }
+    *at.get_or_insert_with(|| Utc::now() + arrival_delay())
+}
+
 type Mailbox = (&'static str, &'static str);
 
 /// One generated message. The mix covers what the reader and replies have to
@@ -263,19 +301,28 @@ fn generate_all(credentials: &MailCredentials) -> Vec<Generated> {
         .rsplit('@')
         .next()
         .unwrap_or("example.com");
-    MESSAGES
-        .iter()
-        .enumerate()
-        .map(|(i, message)| Generated {
+    let sender_name = |message: &FakeMessage| {
+        if demo {
+            message.from.0.to_string()
+        } else {
+            format!("{} ({domain})", message.from.0)
+        }
+    };
+    let arrived = demo.then(|| arrives_at(false)).filter(|at| *at <= now);
+    arrived
+        .map(|received| Generated {
+            uid: ARRIVAL_UID,
+            message: &ARRIVAL,
+            sender_name: sender_name(&ARRIVAL),
+            received,
+        })
+        .into_iter()
+        .chain(MESSAGES.iter().enumerate().map(|(i, message)| Generated {
             uid: 1000 - i as u32,
             message,
-            sender_name: if demo {
-                message.from.0.to_string()
-            } else {
-                format!("{} ({domain})", message.from.0)
-            },
+            sender_name: sender_name(message),
             received: now - Duration::minutes(5 + i as i64 * 300),
-        })
+        }))
         .collect()
 }
 
@@ -415,6 +462,8 @@ fn addresses(mailboxes: &[Mailbox]) -> Vec<MailAddress> {
 /// seen, and a couple remembered. Everything the inbox does is then on show.
 pub async fn reset_demo(db: &SqlitePool, account_id: &str) -> AppResult<()> {
     forget_moves(DEMO_EMAIL);
+    // The new message is yet to come again.
+    arrives_at(true);
     crate::drafts::delete_all(db, account_id).await?;
     let envelopes = envelopes(&MailCredentials {
         host: DEMO_HOST.into(),
@@ -867,6 +916,10 @@ impl MailFetcher for FakeMailFetcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The demo mailbox changes over time (its new message), so tests of it
+    /// take turns.
+    static DEMO_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn credentials(password: &str) -> MailCredentials {
         MailCredentials {
@@ -1459,6 +1512,7 @@ mod tests {
 
     #[tokio::test]
     async fn only_the_demo_account_gets_the_demo_mailbox() {
+        let _demo = DEMO_TESTS.lock().await;
         let mail = WithDemoMailbox(Arc::new(Unreachable));
         let demo = MailCredentials {
             host: DEMO_HOST.into(),
@@ -1486,6 +1540,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_demo_starts_with_new_seen_and_remembered_mail() {
+        let _demo = DEMO_TESTS.lock().await;
         let db = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -1540,5 +1595,39 @@ mod tests {
                 "Flight confirmation - SFO to JFK"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn new_mail_arrives_in_the_demo_a_while_after_it_opens() {
+        let _demo = DEMO_TESTS.lock().await;
+        let demo = MailCredentials {
+            host: DEMO_HOST.into(),
+            port: 993,
+            email: DEMO_EMAIL.into(),
+            password: DEMO_PASSWORD.into(),
+        };
+        let uids = |credentials: &MailCredentials| -> Vec<u32> {
+            envelopes(credentials).iter().map(|e| e.uid).collect()
+        };
+        // Not yet: it comes a minute after the demo is first looked at.
+        arrives_at(true);
+        assert!(!uids(&demo).contains(&ARRIVAL_UID));
+
+        *ARRIVES_AT.lock().unwrap() = Some(Utc::now() - Duration::seconds(1));
+        let envelopes = envelopes(&demo);
+        assert_eq!(envelopes[0].uid, ARRIVAL_UID, "newest, above the rest");
+        assert_eq!(envelopes[0].subject, "New mail, just now");
+        assert_eq!(envelopes.len(), MESSAGES.len() + 1);
+        let email = FakeMailFetcher
+            .fetch_email(&demo, ARRIVAL_UID)
+            .await
+            .unwrap();
+        assert!(email.body_text.unwrap().contains("notification"));
+        // Only the demo gets it.
+        assert!(!uids(&credentials("pw")).contains(&ARRIVAL_UID));
+
+        // Starting the demo over makes it wait again.
+        arrives_at(true);
+        assert!(!uids(&demo).contains(&ARRIVAL_UID));
     }
 }

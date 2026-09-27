@@ -194,6 +194,12 @@ impl DesktopState {
         saved
     }
 
+    /// Every mailbox that can be read right now.
+    pub async fn connected_accounts(&self) -> Vec<ConnectedAccount> {
+        self.wait_until_loaded().await;
+        self.connected.read().await.values().cloned().collect()
+    }
+
     pub async fn require_account(&self, account_id: &str) -> AppResult<ConnectedAccount> {
         self.wait_until_loaded().await;
         if let Some(account) = self.connected.read().await.get(account_id) {

@@ -8,6 +8,7 @@ mod commands;
 mod credentials;
 mod downloads;
 mod state;
+mod watcher;
 
 use inboxmax_core::fake_mail::WithDemoMailbox;
 use state::DesktopState;
@@ -78,6 +79,7 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main")
                 && let Err(e) = fit_to_screen(&window)
@@ -101,6 +103,7 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 handle.state::<DesktopState>().load_saved_passwords().await;
             });
+            tauri::async_runtime::spawn(watcher::run(app.handle().clone()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

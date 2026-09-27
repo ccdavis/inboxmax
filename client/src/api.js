@@ -81,3 +81,9 @@ export const showInFolder = (path) => transport.showInFolder(path);
 
 /** Open a link from an email outside the app. */
 export const openExternal = (url) => transport.openExternal(url);
+
+/**
+ * Call `callback(accountId)` when a mailbox gets new mail (desktop only: its
+ * app checks in the background). Returns a function that stops listening.
+ */
+export const onNewMail = (callback) => transport.onNewMail(callback);

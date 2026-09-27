@@ -37,6 +37,7 @@ vi.mock('./api', () => ({
   forgetEmail: vi.fn(),
   getEmail: vi.fn(),
   openExternal: vi.fn(),
+  onNewMail: vi.fn(() => () => {}),
 }));
 
 import * as api from './api';
@@ -516,6 +517,27 @@ describe('desktop app', () => {
     await screen.findByText('Thirty');
     expect(screen.queryByRole('button', { name: 'Sign out' })).toBeNull();
     expect(screen.queryByRole('link', { name: 'Inbox Max home' })).toBeNull();
+  });
+
+  it('shows new mail as soon as the app says it came in, for the open mailbox only', async () => {
+    let announce;
+    api.onNewMail.mockImplementation((callback) => {
+      announce = callback;
+      return () => {};
+    });
+    render(<DesktopApp />);
+    await screen.findByText('Thirty');
+    const loads = api.getEmails.mock.calls.length;
+
+    await act(async () => announce('someone-else'));
+    expect(api.getEmails).toHaveBeenCalledTimes(loads);
+
+    api.getEmails.mockResolvedValue(inbox([
+      { uid: 31, subject: 'Thirty-one', from: 'C', date: now },
+      { uid: 30, subject: 'Thirty', from: 'B', date: now },
+    ]));
+    await act(async () => announce('work'));
+    expect(await screen.findByText('Thirty-one')).toBeInTheDocument();
   });
 
   it('offers the keychain when connecting', async () => {

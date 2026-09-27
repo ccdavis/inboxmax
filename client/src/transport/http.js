@@ -104,4 +104,7 @@ export const transport = {
     window.open(url, '_blank', 'noopener,noreferrer');
     return Promise.resolve();
   },
+
+  // The web app polls while the page is showing; the server does not push.
+  onNewMail: () => () => {},
 };

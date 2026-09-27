@@ -1,6 +1,7 @@
 // Desktop transport: Tauri IPC commands in the Inbox Max desktop app.
 // Commands mirror the HTTP API and return the same JSON shapes.
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { ApiError } from '../apiError';
 
 async function call(command, args) {
@@ -63,4 +64,12 @@ export const transport = {
   showInFolder: (path) => call('show_in_folder', { path }),
 
   openExternal: (url) => call('open_external', { url }),
+
+  // The app checks for new mail even while its window is hidden.
+  onNewMail: (callback) => {
+    const stop = listen('new-mail', (event) => callback(event.payload.account_id));
+    return () => {
+      stop.then((unlisten) => unlisten()).catch(() => {});
+    };
+  },
 };

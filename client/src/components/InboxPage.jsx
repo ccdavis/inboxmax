@@ -113,6 +113,14 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
   }, [markAllSeen, inboxHidden]);
 
+  // The desktop app says when new mail comes in; show it right away.
+  useEffect(() => {
+    if (!accountId) return undefined;
+    return api.onNewMail((id) => {
+      if (id === accountId) fetchEmails();
+    });
+  }, [fetchEmails, accountId]);
+
   // Poll for new emails while the window is visible.
   useEffect(() => {
     if (!accountId) return undefined;
