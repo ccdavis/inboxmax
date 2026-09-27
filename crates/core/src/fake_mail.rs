@@ -3,6 +3,7 @@
 //! to its demo account (see [`WithDemoMailbox`]); builds with the `fake-mail`
 //! feature also serve it to every account when `INBOXMAX_FAKE_MAIL=1`.
 
+use crate::attachment::{Attachment, safe_filename};
 use crate::error::{AppError, AppResult};
 use crate::imap_client::{
     EmailEnvelope, FullEmail, MailAddress, MailCredentials, MailFetcher, MailboxSnapshot,
@@ -10,6 +11,7 @@ use crate::imap_client::{
 };
 use crate::mailbox::{self, RememberRequest};
 use crate::outgoing::{OutgoingEmail, SendReceipt};
+use base64::Engine;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::Serialize;
 use sqlx::SqlitePool;
@@ -55,6 +57,8 @@ struct FakeMessage {
     text: Option<&'static str>,
     /// Message-IDs of earlier messages in the thread (References).
     thread: &'static [&'static str],
+    /// (file name as sent, content type, contents)
+    attachments: &'static [(&'static str, &'static str, &'static [u8])],
 }
 
 const fn message(from: Mailbox, subject: &'static str) -> FakeMessage {
@@ -66,6 +70,7 @@ const fn message(from: Mailbox, subject: &'static str) -> FakeMessage {
         delivery_delay_minutes: 0,
         text: None,
         thread: &[],
+        attachments: &[],
     }
 }
 
@@ -88,12 +93,25 @@ const MESSAGES: &[FakeMessage] = &[
              Bob thinks we dropped them.\n\nThanks,\nSarah",
         ),
         thread: &["api-spec-kickoff@acme.example"],
+        attachments: &[(
+            "API spec v2 (draft).txt",
+            "text/plain",
+            b"PATCH /v2/items/{id} accepts partial updates.\n",
+        )],
         ..message(
             ("Sarah Chen", "sarah.chen@acme.example"),
             "Quick question about the API spec",
         )
     },
-    message(("Notion", "notify@mail.notion.so"), "Team standup notes"),
+    FakeMessage {
+        // A name that tries to climb out of the download folder.
+        attachments: &[(
+            "../../../standup notes.md",
+            "text/markdown",
+            b"# Standup\n- Shipped the dashboard fix\n",
+        )],
+        ..message(("Notion", "notify@mail.notion.so"), "Team standup notes")
+    },
     FakeMessage {
         reply_to: Some(("Sarah Chen", "sarah.chen@acme.example")),
         ..message(
@@ -107,6 +125,18 @@ const MESSAGES: &[FakeMessage] = &[
     ),
     FakeMessage {
         reply_to: Some(("Acme Corp Billing", "billing@acme.example")),
+        attachments: &[
+            (
+                "Invoice-1042.pdf",
+                "application/pdf",
+                b"%PDF-1.4\n% Inbox Max demo invoice\n%%EOF\n",
+            ),
+            (
+                "Receipt-1042.pdf",
+                "application/pdf",
+                b"%PDF-1.4\n% Inbox Max demo receipt\n%%EOF\n",
+            ),
+        ],
         ..message(
             ("Stripe", "invoices@stripe.com"),
             "Invoice #1042 from Acme Corp",
@@ -114,6 +144,11 @@ const MESSAGES: &[FakeMessage] = &[
     },
     FakeMessage {
         delivery_delay_minutes: 180,
+        attachments: &[(
+            "Itinerary SFO-JFK.ics",
+            "text/calendar",
+            b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n",
+        )],
         ..message(
             ("Delta Air Lines", "deltaairlines@t.delta.com"),
             "Flight confirmation - SFO to JFK",
@@ -195,6 +230,20 @@ fn envelopes(credentials: &MailCredentials) -> Vec<EmailEnvelope> {
     generate(credentials)
         .iter()
         .map(Generated::envelope)
+        .collect()
+}
+
+/// A message's attachments as a mail server would hand them over: named
+/// safely, the way real messages are parsed.
+fn attachments(message: &FakeMessage) -> Vec<Attachment> {
+    message
+        .attachments
+        .iter()
+        .map(|(name, content_type, data)| Attachment {
+            filename: safe_filename(name),
+            content_type: (*content_type).into(),
+            data: data.to_vec(),
+        })
         .collect()
 }
 
@@ -282,6 +331,17 @@ impl MailFetcher for WithDemoMailbox {
         self.pick(credentials).fetch_email(credentials, uid).await
     }
 
+    async fn fetch_attachment(
+        &self,
+        credentials: &MailCredentials,
+        uid: u32,
+        index: usize,
+    ) -> AppResult<Attachment> {
+        self.pick(credentials)
+            .fetch_attachment(credentials, uid, index)
+            .await
+    }
+
     async fn search(
         &self,
         credentials: &MailCredentials,
@@ -321,8 +381,39 @@ pub struct SentMessage {
     pub bcc: Vec<MailAddress>,
     pub subject: String,
     pub body: String,
+    /// The attachments as a recipient's mail client decodes them from `raw`.
+    pub attachments: Vec<ReceivedAttachment>,
     /// The formatted message as sent (without a Bcc header).
     pub raw: String,
+}
+
+/// An attachment of a sent message, decoded from the message itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReceivedAttachment {
+    pub filename: String,
+    pub content_type: String,
+    pub size: usize,
+    /// The decoded contents, base64-encoded for JSON.
+    pub data: String,
+}
+
+/// The attachments a recipient would find in `raw`.
+fn received_attachments(raw: &[u8]) -> AppResult<Vec<ReceivedAttachment>> {
+    let message = mail_parser::MessageParser::default()
+        .parse(raw)
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("sent an unparseable message")))?;
+    let count = crate::attachment::list(&message).len();
+    (0..count)
+        .map(|index| {
+            let attachment = crate::attachment::extract(raw, index)?;
+            Ok(ReceivedAttachment {
+                size: attachment.data.len(),
+                data: base64::engine::general_purpose::STANDARD.encode(&attachment.data),
+                filename: attachment.filename,
+                content_type: attachment.content_type,
+            })
+        })
+        .collect()
 }
 
 static OUTBOX: Mutex<Vec<SentMessage>> = Mutex::new(Vec::new());
@@ -385,7 +476,25 @@ impl MailFetcher for FakeMailFetcher {
             body_text: message.text.map(Into::into),
             message_id: Some(format!("{uid}.{UID_VALIDITY}@fake.inboxmax.invalid")),
             references: message.thread.iter().map(|id| id.to_string()).collect(),
+            attachments: attachments(message)
+                .iter()
+                .enumerate()
+                .map(|(index, attachment)| attachment.info(index))
+                .collect(),
         })
+    }
+
+    async fn fetch_attachment(
+        &self,
+        credentials: &MailCredentials,
+        uid: u32,
+        index: usize,
+    ) -> AppResult<Attachment> {
+        generate(credentials)
+            .into_iter()
+            .find(|g| g.uid == uid)
+            .and_then(|g| attachments(g.message).into_iter().nth(index))
+            .ok_or_else(|| AppError::NotFound("Attachment not found".into()))
     }
 
     async fn search(
@@ -426,7 +535,9 @@ impl MailFetcher for FakeMailFetcher {
                 refused.email
             )));
         }
-        let raw = String::from_utf8_lossy(&email.message(false)?.formatted()).into_owned();
+        let formatted = email.message(false)?.formatted();
+        let attachments = received_attachments(&formatted)?;
+        let raw = String::from_utf8_lossy(&formatted).into_owned();
         let mut outbox = OUTBOX
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -441,6 +552,7 @@ impl MailFetcher for FakeMailFetcher {
             bcc: email.bcc.clone(),
             subject: email.subject.clone(),
             body: email.body.clone(),
+            attachments,
             raw,
         });
         Ok(SendReceipt {
@@ -636,6 +748,98 @@ mod tests {
                 Some("Sarah Chen".to_string())
             )],
             "Sarah once (as sender and as Reply-To); the calendar and GitHub robots are skipped"
+        );
+    }
+
+    #[tokio::test]
+    async fn forwarding_sends_the_originals_attachments() {
+        let db = db().await;
+        let account = connected("forwarder@example.com");
+        let stripe = 1000
+            - MESSAGES
+                .iter()
+                .position(|m| m.subject.starts_with("Invoice"))
+                .unwrap() as i64;
+        let original = mailbox::get_email(&db, &FakeMailFetcher, "u", &account, stripe)
+            .await
+            .unwrap();
+        assert_eq!(original.attachments.len(), 2);
+
+        mailbox::send(
+            &db,
+            &FakeMailFetcher,
+            "u",
+            &account,
+            crate::outgoing::SendRequest {
+                to: vec![MailAddress::new(None, "accounts@acme.example")],
+                subject: "Fwd: Invoice".into(),
+                // Only the receipt, which is the second attachment.
+                forward: Some(crate::outgoing::ForwardedAttachments {
+                    uid: stripe,
+                    indexes: vec![1],
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let [sent] = &sent_messages("forwarder@example.com")[..] else {
+            panic!("one message")
+        };
+        let receipt = FakeMailFetcher
+            .fetch_attachment(&account.mail_credentials(), stripe as u32, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            sent.attachments,
+            [ReceivedAttachment {
+                filename: receipt.filename,
+                content_type: receipt.content_type,
+                size: receipt.data.len(),
+                data: base64::engine::general_purpose::STANDARD.encode(&receipt.data),
+            }],
+            "the recipient gets the original's bytes"
+        );
+
+        // A missing attachment fails the send rather than dropping it.
+        let error = mailbox::send(
+            &db,
+            &FakeMailFetcher,
+            "u",
+            &account,
+            crate::outgoing::SendRequest {
+                to: vec![MailAddress::new(None, "accounts@acme.example")],
+                forward: Some(crate::outgoing::ForwardedAttachments {
+                    uid: stripe,
+                    indexes: vec![5],
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::NotFound(_)));
+        assert_eq!(sent_messages("forwarder@example.com").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn attachment_names_are_made_safe() {
+        let creds = credentials("pw");
+        let notion = 1000
+            - MESSAGES
+                .iter()
+                .position(|m| m.subject.contains("standup"))
+                .unwrap() as u32;
+        let attachment = FakeMailFetcher
+            .fetch_attachment(&creds, notion, 0)
+            .await
+            .unwrap();
+        assert_eq!(attachment.filename, "_.._.._standup notes.md");
+        assert!(
+            FakeMailFetcher
+                .fetch_attachment(&creds, notion, 1)
+                .await
+                .is_err()
         );
     }
 

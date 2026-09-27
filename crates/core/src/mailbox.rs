@@ -3,6 +3,7 @@
 //! The web and desktop front ends expose these unchanged.
 
 use crate::account::ConnectedAccount;
+use crate::attachment::Attachment;
 use crate::contacts;
 use crate::error::{AppError, AppResult};
 use crate::imap_client::{EmailEnvelope, FullEmail, MailAddress, MailFetcher};
@@ -182,6 +183,18 @@ pub async fn get_email(
     Ok(email)
 }
 
+/// One attachment of a message, by its position among the attachments.
+pub async fn get_attachment(
+    mail: &dyn MailFetcher,
+    account: &ConnectedAccount,
+    uid: i64,
+    index: usize,
+) -> AppResult<Attachment> {
+    let uid = validate_uid(uid)?;
+    mail.fetch_attachment(&account.mail_credentials(), uid, index)
+        .await
+}
+
 /// Record `uid` as the last-seen email and the visit time.
 pub async fn set_watermark(db: &SqlitePool, account: &ConnectedAccount, uid: i64) -> AppResult<()> {
     validate_uid(uid)?;
@@ -203,7 +216,20 @@ pub async fn send(
     account: &ConnectedAccount,
     request: SendRequest,
 ) -> AppResult<SendReceipt> {
-    let email = OutgoingEmail::new(MailAddress::new(None, &account.email), request)?;
+    let forward = request.forward.clone();
+    let mut email = OutgoingEmail::new(MailAddress::new(None, &account.email), request)?;
+    // A forward's attachments come straight from the original message.
+    if let Some(forward) = forward {
+        let uid = validate_uid(forward.uid)?;
+        let mut originals = Vec::with_capacity(forward.indexes.len());
+        for index in forward.indexes {
+            originals.push(
+                mail.fetch_attachment(&account.mail_credentials(), uid, index)
+                    .await?,
+            );
+        }
+        email.attach(originals)?;
+    }
     let receipt = mail
         .send(&account.mail_credentials(), &account.smtp, &email)
         .await?;

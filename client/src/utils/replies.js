@@ -111,7 +111,10 @@ export function hasOtherRecipients(email, { me }) {
   return all.to.length + all.cc.length > reply.to.length;
 }
 
-/** A forward: the original's headers in full, then its text. */
+/**
+ * A forward: the original's headers in full, then its text, with its
+ * attachments to send along (fetched by the server from the original).
+ */
 export function forwardDraft(email) {
   const header = [
     '---------- Forwarded message ----------',
@@ -128,6 +131,8 @@ export function forwardDraft(email) {
     body: `\n\n${header.join('\n')}\n\n${bodyText(email)}\n`,
     in_reply_to: null,
     references: [],
+    attachments: email.attachments ?? [],
+    forward_uid: email.uid,
     focus: 'to',
   };
 }

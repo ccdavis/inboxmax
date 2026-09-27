@@ -21,8 +21,14 @@ pub struct AppState {
     pub limiter: AttemptLimiter,
 }
 
+/// A message with the most attachments allowed, base64-encoded in JSON
+/// (4 bytes for every 3), plus room for the text.
+const SEND_BODY_LIMIT: usize =
+    inboxmax_core::outgoing::MAX_ATTACHMENT_BYTES / 3 * 4 + 4 * 1024 * 1024;
+
 /// Build the complete API router so production and tests exercise the same routes.
 pub fn api_router(state: AppState) -> axum::Router {
+    use axum::extract::DefaultBodyLimit;
     use axum::routing::{get, post, put};
     use handlers::{accounts, auth, contacts, emails, remembered};
 
@@ -60,7 +66,14 @@ pub fn api_router(state: AppState) -> axum::Router {
             "/api/accounts/{account_id}/search",
             get(emails::search_emails),
         )
-        .route("/api/accounts/{account_id}/send", post(emails::send_email))
+        .route(
+            "/api/accounts/{account_id}/emails/{uid}/attachments/{index}",
+            get(emails::download_attachment),
+        )
+        .route(
+            "/api/accounts/{account_id}/send",
+            post(emails::send_email).layer(DefaultBodyLimit::max(SEND_BODY_LIMIT)),
+        )
         .route(
             "/api/accounts/{account_id}/watermark",
             put(emails::set_watermark),

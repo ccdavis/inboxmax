@@ -5,6 +5,8 @@ import EmailReader from './EmailReader';
 // Mock the api module
 vi.mock('../api', () => ({
   getEmail: vi.fn(),
+  downloadAttachment: vi.fn(),
+  showInFolder: vi.fn(),
 }));
 
 import * as api from '../api';
@@ -191,6 +193,61 @@ describe('EmailReader', () => {
     it('says so when there is no sender', async () => {
       await renderHeaders({ from: [] });
       expect(row('From')).toHaveTextContent('Unknown sender');
+    });
+  });
+
+  describe('attachments', () => {
+    const INVOICE = { index: 0, filename: 'Invoice-1042.pdf', content_type: 'application/pdf', size: 48_000 };
+    const ITINERARY = { index: 1, filename: 'Itinerary.ics', content_type: 'text/calendar', size: 300 };
+
+    async function renderWithAttachments(attachments) {
+      api.getEmail.mockResolvedValue({
+        uid: 12,
+        subject: 'Files',
+        from: [{ name: null, email: 'a@x.example' }],
+        to: [],
+        date: null,
+        body_html: null,
+        body_text: 'See attached',
+        attachments,
+      });
+      render(<EmailReader accountId="acct" emailUid={12} onBack={() => {}} />);
+      await screen.findByRole('heading', { name: 'Files' });
+    }
+
+    it('lists each attachment with its size, and downloads the one chosen', async () => {
+      api.downloadAttachment.mockResolvedValue(null);
+      await renderWithAttachments([INVOICE, ITINERARY]);
+      const list = screen.getByRole('region', { name: 'Attachments' });
+      expect(list).toHaveTextContent('Invoice-1042.pdf47 KB');
+      expect(list).toHaveTextContent('Itinerary.ics300 B');
+
+      screen.getByRole('button', { name: 'Download Itinerary.ics, 300 B' }).click();
+      await waitFor(() => expect(api.downloadAttachment).toHaveBeenCalledWith('acct', 12, 1));
+      // The web app leaves the file to the browser; nothing to report.
+      expect(screen.queryByRole('status')).toBeNull();
+    });
+
+    it('says where the desktop app saved a file and can show it', async () => {
+      api.downloadAttachment.mockResolvedValue({ path: 'C:\\Users\\me\\Downloads\\Invoice-1042 (1).pdf', filename: 'Invoice-1042 (1).pdf' });
+      api.showInFolder.mockResolvedValue(undefined);
+      await renderWithAttachments([INVOICE]);
+      screen.getByRole('button', { name: /^Download Invoice-1042\.pdf/ }).click();
+      expect(await screen.findByRole('status')).toHaveTextContent('Saved Invoice-1042 (1).pdf in Downloads.');
+      screen.getByRole('button', { name: 'Show in folder' }).click();
+      expect(api.showInFolder).toHaveBeenCalledWith('C:\\Users\\me\\Downloads\\Invoice-1042 (1).pdf');
+    });
+
+    it('reports a failed download', async () => {
+      api.downloadAttachment.mockRejectedValue(new Error('Attachment not found'));
+      await renderWithAttachments([INVOICE]);
+      screen.getByRole('button', { name: /^Download Invoice-1042\.pdf/ }).click();
+      expect(await screen.findByRole('alert')).toHaveTextContent('Could not download Invoice-1042.pdf: Attachment not found');
+    });
+
+    it('shows nothing for a message without attachments', async () => {
+      await renderWithAttachments([]);
+      expect(screen.queryByRole('region', { name: 'Attachments' })).toBeNull();
     });
   });
 

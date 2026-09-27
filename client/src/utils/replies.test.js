@@ -84,6 +84,13 @@ describe('replyDraft', () => {
 });
 
 describe('forwardDraft', () => {
+  it('carries the original attachments to send along', () => {
+    const invoice = { index: 0, filename: 'invoice.pdf', content_type: 'application/pdf', size: 9 };
+    expect(forwardDraft(message({ uid: 42, attachments: [invoice] })))
+      .toMatchObject({ attachments: [invoice], forward_uid: 42 });
+    expect(forwardDraft(message()).attachments).toEqual([]);
+  });
+
   it('carries the original headers in full and the text, with no recipients or threading', () => {
     const draft = forwardDraft(message());
     expect(draft).toMatchObject({ to: [], cc: [], subject: 'Fwd: Plans', in_reply_to: null, references: [], focus: 'to' });

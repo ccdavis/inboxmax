@@ -2,11 +2,13 @@
 //! message. Sending it is up to the [`MailFetcher`](crate::imap_client::MailFetcher).
 
 use crate::account::normalize_email;
+use crate::attachment::{Attachment, safe_filename};
 use crate::error::{AppError, AppResult};
 use crate::imap_client::MailAddress;
+use base64::Engine;
 use lettre::Message;
-use lettre::message::Mailbox;
 use lettre::message::header::ContentType;
+use lettre::message::{Mailbox, MultiPart, SinglePart};
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
@@ -14,6 +16,26 @@ pub const MAX_RECIPIENTS: usize = 100;
 /// RFC 5322's line limit, which a folded subject stays well within.
 const MAX_SUBJECT_CHARS: usize = 998;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
+/// All attachments together, as most providers (Gmail among them) allow.
+pub const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
+
+/// A file attached while composing, base64-encoded.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AttachmentUpload {
+    pub filename: String,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    /// Standard base64.
+    pub data: String,
+}
+
+/// Attachments of a message in the same mailbox to send along, as a forward
+/// does, by their positions among its attachments.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ForwardedAttachments {
+    pub uid: i64,
+    pub indexes: Vec<usize>,
+}
 
 /// What the compose form sends.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -34,6 +56,11 @@ pub struct SendRequest {
     /// Message-IDs of the thread so far, oldest first.
     #[serde(default)]
     pub references: Vec<String>,
+    #[serde(default)]
+    pub attachments: Vec<AttachmentUpload>,
+    /// The original's attachments, when forwarding.
+    #[serde(default)]
+    pub forward: Option<ForwardedAttachments>,
 }
 
 /// The outcome of a send.
@@ -56,9 +83,32 @@ pub struct OutgoingEmail {
     pub body: String,
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
+    pub attachments: Vec<Attachment>,
     /// Without angle brackets.
     pub message_id: String,
     pub date: SystemTime,
+}
+
+const BINARY: &str = "application/octet-stream";
+
+/// The content type if lettre accepts it, else the generic binary one.
+fn checked_content_type(content_type: Option<&str>) -> String {
+    content_type
+        .map(str::trim)
+        .filter(|ct| ContentType::parse(ct).is_ok())
+        .map_or_else(|| BINARY.into(), str::to_ascii_lowercase)
+}
+
+fn decoded(upload: &AttachmentUpload) -> AppResult<Attachment> {
+    let filename = safe_filename(&upload.filename);
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(upload.data.trim())
+        .map_err(|_| AppError::BadRequest(format!("Could not read the attachment “{filename}”")))?;
+    Ok(Attachment {
+        content_type: checked_content_type(upload.content_type.as_deref()),
+        filename,
+        data,
+    })
 }
 
 /// Drop control characters (CR and LF included, so nothing can start a new
@@ -127,8 +177,15 @@ impl OutgoingEmail {
         if request.body.len() > MAX_BODY_BYTES {
             return Err(AppError::BadRequest("The message is too long".into()));
         }
+        let attachments = request
+            .attachments
+            .iter()
+            .map(decoded)
+            .collect::<AppResult<Vec<_>>>()?;
+        check_attachment_size(&attachments)?;
         let domain = from.email.rsplit('@').next().unwrap_or("inboxmax.invalid");
         Ok(Self {
+            attachments,
             message_id: format!("{}@{domain}", uuid::Uuid::new_v4()),
             date: SystemTime::now(),
             in_reply_to: request.in_reply_to.as_deref().and_then(bare_message_id),
@@ -149,6 +206,12 @@ impl OutgoingEmail {
     /// Everyone the message goes to.
     pub fn recipients(&self) -> impl Iterator<Item = &MailAddress> {
         self.to.iter().chain(&self.cc).chain(&self.bcc)
+    }
+
+    /// Attach more files (a forward's originals), within the size limit.
+    pub fn attach(&mut self, more: Vec<Attachment>) -> AppResult<()> {
+        self.attachments.extend(more);
+        check_attachment_size(&self.attachments)
     }
 
     /// The message as sent. `keep_bcc` keeps the Bcc header, for the copy
@@ -190,11 +253,38 @@ impl OutgoingEmail {
         if keep_bcc {
             builder = builder.keep_bcc();
         }
-        builder
-            .header(ContentType::TEXT_PLAIN)
-            .body(self.body.clone())
-            .map_err(|e| AppError::BadRequest(format!("Could not build the message: {e}")))
+        let built = if self.attachments.is_empty() {
+            builder
+                .header(ContentType::TEXT_PLAIN)
+                .body(self.body.clone())
+        } else {
+            let mut parts = MultiPart::mixed().singlepart(SinglePart::plain(self.body.clone()));
+            for attachment in &self.attachments {
+                let content_type =
+                    ContentType::parse(&checked_content_type(Some(&attachment.content_type)))
+                        .map_err(|e| {
+                            AppError::BadRequest(format!("Could not build the message: {e}"))
+                        })?;
+                parts = parts.singlepart(
+                    lettre::message::Attachment::new(attachment.filename.clone())
+                        .body(attachment.data.clone(), content_type),
+                );
+            }
+            builder.multipart(parts)
+        };
+        built.map_err(|e| AppError::BadRequest(format!("Could not build the message: {e}")))
     }
+}
+
+fn check_attachment_size(attachments: &[Attachment]) -> AppResult<()> {
+    let total: usize = attachments.iter().map(|a| a.data.len()).sum();
+    if total > MAX_ATTACHMENT_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "Attachments can total at most {} MB",
+            MAX_ATTACHMENT_BYTES / (1024 * 1024)
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -352,6 +442,105 @@ mod tests {
                 ..request()
             })
             .contains("too long")
+        );
+    }
+
+    fn upload(filename: &str, content_type: Option<&str>, data: &[u8]) -> AttachmentUpload {
+        AttachmentUpload {
+            filename: filename.into(),
+            content_type: content_type.map(Into::into),
+            data: base64::engine::general_purpose::STANDARD.encode(data),
+        }
+    }
+
+    #[test]
+    fn attachments_arrive_as_sent() {
+        let mut email = OutgoingEmail::new(
+            me(),
+            SendRequest {
+                attachments: vec![
+                    upload("notes.txt", Some("text/plain"), b"hello"),
+                    upload("../photo.jpg", Some("not a type"), &[0xff, 0xd8, 0xff]),
+                ],
+                ..request()
+            },
+        )
+        .unwrap();
+        email
+            .attach(vec![Attachment {
+                filename: "Invoice-1042.pdf".into(),
+                content_type: "application/pdf".into(),
+                data: b"%PDF-1.4".to_vec(),
+            }])
+            .unwrap();
+
+        let raw = formatted(&email, false);
+        assert!(raw.contains("Content-Type: multipart/mixed"));
+        let received = crate::imap_client::parse_message(1, raw.as_bytes(), None).unwrap();
+        let listed: Vec<_> = received
+            .attachments
+            .iter()
+            .map(|a| (a.filename.as_str(), a.content_type.as_str(), a.size))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("notes.txt", "text/plain", 5),
+                ("_photo.jpg", "application/octet-stream", 3),
+                ("Invoice-1042.pdf", "application/pdf", 8),
+            ]
+        );
+        assert_eq!(
+            received.body_text.as_deref().map(str::trim_end),
+            Some("Noon at the usual place.\r\nCafé Olé.")
+        );
+        let photo = crate::attachment::extract(raw.as_bytes(), 1).unwrap();
+        assert_eq!(photo.data, [0xff, 0xd8, 0xff]);
+    }
+
+    #[test]
+    fn rejects_unreadable_and_oversized_attachments() {
+        let fails = |attachments| {
+            OutgoingEmail::new(
+                me(),
+                SendRequest {
+                    attachments,
+                    ..request()
+                },
+            )
+            .unwrap_err()
+            .to_string()
+        };
+        assert_eq!(
+            fails(vec![AttachmentUpload {
+                filename: "x.bin".into(),
+                content_type: None,
+                data: "not base64!".into(),
+            }]),
+            "Could not read the attachment “x.bin”"
+        );
+        let big = vec![0u8; MAX_ATTACHMENT_BYTES / 2 + 1];
+        assert_eq!(
+            fails(vec![upload("a", None, &big), upload("b", None, &big)]),
+            "Attachments can total at most 25 MB"
+        );
+
+        let mut email = OutgoingEmail::new(
+            me(),
+            SendRequest {
+                attachments: vec![upload("a", None, &big)],
+                ..request()
+            },
+        )
+        .unwrap();
+        let more = Attachment {
+            filename: "b".into(),
+            content_type: "application/octet-stream".into(),
+            data: big,
+        };
+        assert!(
+            email.attach(vec![more]).is_err(),
+            "forwarded files count too"
         );
     }
 

@@ -4,6 +4,7 @@
 //! profile over Tauri IPC.
 
 pub mod account;
+pub mod attachment;
 pub mod config;
 pub mod contacts;
 pub mod db;

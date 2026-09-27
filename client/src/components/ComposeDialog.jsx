@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import Dialog from './Dialog';
 import RecipientField from './RecipientField';
 import { commitText } from '../utils/addresses';
+import { MAX_ATTACHMENT_BYTES, formatSize, readAsBase64 } from '../utils/files';
 
 const EMPTY_FIELD = { addresses: [], text: '' };
 const FIELDS = [
@@ -25,7 +26,8 @@ function field(addresses = []) {
  * discarding (which asks first once anything has been written).
  *
  * `initial` pre-fills a reply or forward: { to, cc, bcc, subject, body,
- * in_reply_to, references, focus: 'to' | 'body' }. `onSend(request)` sends
+ * in_reply_to, references, focus: 'to' | 'body' }, and for a forward the
+ * original's `attachments` (sent along unless removed) and `forward_uid`. `onSend(request)` sends
  * and resolves to the receipt; `onSent(receipt, request)` follows.
  * `suggestContacts(query)` resolves to address-book entries to suggest.
  */
@@ -44,6 +46,11 @@ export default function ComposeDialog({ from, title = 'New message', initial = {
   }));
   const [subject, setSubject] = useState(initial.subject ?? '');
   const [body, setBody] = useState(initial.body ?? '');
+  // Attachments: files added here ({ key, filename, content_type, size, data })
+  // and a forward's originals ({ key, index, filename, content_type, size }).
+  const [files, setFiles] = useState(() => (initial.attachments ?? []).map((a) => ({ ...a, key: `original-${a.index}` })));
+  const fileInput = useRef(null);
+  const fileKey = useRef(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   // An open question before acting: 'discard' or 'no-subject'.
@@ -65,7 +72,33 @@ export default function ComposeDialog({ from, title = 'New message', initial = {
   const dirty = FIELDS.some(([key]) => {
     const start = initial[key] ?? [];
     return fields[key].text.trim() || fields[key].addresses.length !== start.length;
-  }) || subject !== (initial.subject ?? '') || body !== (initial.body ?? '');
+  }) || subject !== (initial.subject ?? '') || body !== (initial.body ?? '')
+    || files.length !== (initial.attachments ?? []).length || files.some((f) => f.data);
+
+  const addFiles = async (fileList) => {
+    const added = [...fileList];
+    if (!added.length) return;
+    setError(null);
+    const total = [...files, ...added].reduce((sum, f) => sum + f.size, 0);
+    if (total > MAX_ATTACHMENT_BYTES) {
+      setError(`Attachments can total at most ${formatSize(MAX_ATTACHMENT_BYTES)}`);
+      return;
+    }
+    try {
+      const read = await Promise.all(added.map(async (file) => ({
+        key: `file-${fileKey.current++}`,
+        filename: file.name,
+        content_type: file.type || 'application/octet-stream',
+        size: file.size,
+        data: await readAsBase64(file),
+      })));
+      setFiles((current) => [...current, ...read]);
+    } catch (caught) {
+      setError(caught.message);
+    }
+  };
+
+  const removeFile = (key) => setFiles((current) => current.filter((f) => f.key !== key));
 
   const requestClose = () => {
     if (busy) return;
@@ -111,6 +144,12 @@ export default function ComposeDialog({ from, title = 'New message', initial = {
       body,
       in_reply_to: initial.in_reply_to ?? null,
       references: initial.references ?? [],
+      attachments: files
+        .filter((f) => f.data)
+        .map(({ filename, content_type, data }) => ({ filename, content_type, data })),
+      forward: files.some((f) => f.data == null)
+        ? { uid: initial.forward_uid, indexes: files.filter((f) => f.data == null).map((f) => f.index) }
+        : null,
     };
     setBusy(true);
     try {
@@ -154,6 +193,15 @@ export default function ComposeDialog({ from, title = 'New message', initial = {
     <Dialog title={title} onClose={requestClose} closeDisabled={busy} onKeyDown={handleKeyDown} className="sm:max-w-2xl">
         <form
           className="flex min-h-0 flex-1 flex-col"
+          // Files dropped anywhere on the message are attached.
+          onDragOver={(e) => {
+            if (e.dataTransfer?.types?.includes('Files')) e.preventDefault();
+          }}
+          onDrop={(e) => {
+            if (!e.dataTransfer?.files?.length) return;
+            e.preventDefault();
+            addFiles(e.dataTransfer.files);
+          }}
           onSubmit={(e) => {
             e.preventDefault();
             send();
@@ -189,6 +237,26 @@ export default function ComposeDialog({ from, title = 'New message', initial = {
             </div>
           </div>
 
+          {files.length > 0 && (
+            <ul aria-label="Attachments" className="flex flex-wrap gap-1.5 border-b border-line px-4 py-2">
+              {files.map((file) => (
+                <li key={file.key} className="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-line py-0.5 pl-2 pr-1 text-sm">
+                  <span aria-hidden="true">📎</span>
+                  <span className="min-w-0 truncate text-ink">{file.filename}</span>
+                  <span className="shrink-0 text-xs text-ink-muted">{formatSize(file.size)}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeFile(file.key)}
+                    className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-muted hover:bg-hover hover:text-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+                    aria-label={`Remove attachment ${file.filename}`}
+                  >
+                    <span aria-hidden="true">×</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
           <label htmlFor={bodyId} className="sr-only">Message</label>
           <textarea
             id={bodyId}
@@ -222,6 +290,20 @@ export default function ComposeDialog({ from, title = 'New message', initial = {
               </div>
             ) : (
               <div className="flex items-center justify-end gap-2">
+                <button type="button" onClick={() => fileInput.current?.click()} disabled={busy} className={SECONDARY_BUTTON}>
+                  <span aria-hidden="true">📎</span> Attach
+                </button>
+                <input
+                  ref={fileInput}
+                  type="file"
+                  multiple
+                  hidden
+                  aria-label="Attach files"
+                  onChange={(e) => {
+                    addFiles(e.target.files);
+                    e.target.value = '';
+                  }}
+                />
                 <span className="mr-auto hidden text-xs text-ink-muted sm:inline">Ctrl+Enter to send</span>
                 <button type="button" onClick={requestClose} disabled={busy} className={SECONDARY_BUTTON}>Discard</button>
                 <button type="submit" disabled={busy} className={PRIMARY_BUTTON}>

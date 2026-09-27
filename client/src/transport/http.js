@@ -65,6 +65,19 @@ export const transport = {
   saveContact: (contact) => request('/api/contacts', json('POST', contact)),
   deleteContact: (id) => request(`/api/contacts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
+  // The server sends attachments as downloads, so following the link saves
+  // the file without leaving the page.
+  downloadAttachment: (accountId, uid, index) => {
+    const link = document.createElement('a');
+    link.href = `${account(accountId)}/emails/${encodeURIComponent(uid)}/attachments/${encodeURIComponent(index)}`;
+    link.download = '';
+    document.body.append(link);
+    link.click();
+    link.remove();
+    return Promise.resolve(null);
+  },
+  showInFolder: () => Promise.reject(new ApiError(400, 'Not available in the web app')),
+
   // Links in emails carry target="_blank", so the browser opens them itself.
   openExternal: (url) => {
     window.open(url, '_blank', 'noopener,noreferrer');

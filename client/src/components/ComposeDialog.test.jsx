@@ -85,6 +85,8 @@ describe('ComposeDialog', () => {
       body: 'Line one\nLine two',
       in_reply_to: null,
       references: [],
+      attachments: [],
+      forward: null,
     };
     expect(onSend).toHaveBeenCalledWith(request);
     expect(onSent).toHaveBeenCalledWith({ message_id: 'id@x', saved_to_sent: true }, request);
@@ -174,6 +176,80 @@ describe('ComposeDialog', () => {
     fireEvent.keyDown(dialog(), { key: 'Escape' });
     fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  describe('attachments', () => {
+    const file = (name, content, type = 'text/plain') => new File([content], name, { type });
+    const attach = (...files) => fireEvent.change(screen.getByLabelText('Attach files'), { target: { files } });
+    const attached = () => screen.queryByRole('list', { name: 'Attachments' });
+
+    it('attaches files, lists them with sizes, and sends them base64-encoded', async () => {
+      const { onSend } = renderCompose();
+      type(to(), 'a@x.example');
+      type(screen.getByLabelText('Subject'), 'Files');
+      attach(file('notes.txt', 'hello'), file('photo.jpg', new Uint8Array([0xff, 0xd8]), ''));
+      await waitFor(() => expect(within(attached()).getAllByRole('listitem')).toHaveLength(2));
+      expect(attached()).toHaveTextContent('notes.txt5 B');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Remove attachment photo.jpg' }));
+      attach(file('photo.jpg', new Uint8Array([0xff, 0xd8]), ''));
+      await waitFor(() => expect(within(attached()).getAllByRole('listitem')).toHaveLength(2));
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+      await waitFor(() => expect(onSend).toHaveBeenCalled());
+      expect(onSend.mock.calls[0][0]).toMatchObject({
+        attachments: [
+          { filename: 'notes.txt', content_type: 'text/plain', data: btoa('hello') },
+          { filename: 'photo.jpg', content_type: 'application/octet-stream', data: btoa('\xff\xd8') },
+        ],
+        forward: null,
+      });
+    });
+
+    it('refuses more than 25 MB in all', async () => {
+      const { onSend } = renderCompose();
+      // Sizes are checked before anything is read, so stand-ins will do.
+      const sized = (name, megabytes) => {
+        const stand_in = new File(['x'], name);
+        Object.defineProperty(stand_in, 'size', { value: megabytes * 1024 * 1024 });
+        return stand_in;
+      };
+      attach(sized('big.bin', 20));
+      await waitFor(() => expect(attached()).not.toBeNull());
+      attach(sized('huge.bin', 6));
+      expect(await screen.findByRole('alert')).toHaveTextContent('Attachments can total at most 25 MB');
+      expect(within(attached()).getAllByRole('listitem')).toHaveLength(1);
+      expect(onSend).not.toHaveBeenCalled();
+    });
+
+    it("sends a forward's original attachments unless removed", async () => {
+      const { onSend } = renderCompose({
+        title: 'Forward',
+        initial: {
+          subject: 'Fwd: Invoice',
+          forward_uid: 994,
+          attachments: [
+            { index: 0, filename: 'Invoice.pdf', content_type: 'application/pdf', size: 2048 },
+            { index: 1, filename: 'Receipt.pdf', content_type: 'application/pdf', size: 1024 },
+          ],
+        },
+      });
+      expect(attached()).toHaveTextContent('Invoice.pdf2 KB');
+      fireEvent.click(screen.getByRole('button', { name: 'Remove attachment Invoice.pdf' }));
+      type(to(), 'a@x.example');
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+      await waitFor(() => expect(onSend).toHaveBeenCalled());
+      expect(onSend.mock.calls[0][0]).toMatchObject({ attachments: [], forward: { uid: 994, indexes: [1] } });
+    });
+
+    it('counts attachments as unsaved work', async () => {
+      const { onClose } = renderCompose();
+      attach(file('notes.txt', 'hello'));
+      await waitFor(() => expect(attached()).not.toBeNull());
+      fireEvent.keyDown(screen.getByRole('dialog', { name: 'New message' }), { key: 'Escape' });
+      expect(screen.getByRole('group', { name: 'Discard this message?' })).toBeInTheDocument();
+      expect(onClose).not.toHaveBeenCalled();
+    });
   });
 
   it('pre-fills a reply and puts the cursor at the top of the body', () => {

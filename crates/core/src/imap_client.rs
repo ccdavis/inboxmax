@@ -1,3 +1,4 @@
+use crate::attachment::{Attachment, AttachmentInfo};
 use crate::config::server_files_sent_mail;
 use crate::error::{AppError, AppResult};
 use crate::outgoing::{OutgoingEmail, SendReceipt};
@@ -64,6 +65,17 @@ pub trait MailFetcher: Send + Sync {
 
     async fn fetch_email(&self, credentials: &MailCredentials, uid: u32) -> AppResult<FullEmail>;
 
+    /// One attachment of a message, by its position among the attachments.
+    async fn fetch_attachment(
+        &self,
+        credentials: &MailCredentials,
+        uid: u32,
+        index: usize,
+    ) -> AppResult<Attachment> {
+        let _ = (credentials, uid, index);
+        Err(AppError::NotFound("Attachment not found".into()))
+    }
+
     async fn search(
         &self,
         credentials: &MailCredentials,
@@ -98,6 +110,22 @@ impl MailFetcher for RealMailFetcher {
             let email = fetch_email_by_uid(&mut session, uid).await?;
             let _ = session.logout().await;
             Ok(email)
+        })
+        .await
+    }
+
+    async fn fetch_attachment(
+        &self,
+        credentials: &MailCredentials,
+        uid: u32,
+        index: usize,
+    ) -> AppResult<Attachment> {
+        run_with_timeout(async {
+            let mut session = connect(credentials).await?;
+            // PEEK: downloading an attachment is not reading the message.
+            let fetched = fetch_raw(&mut session, uid, "(UID BODY.PEEK[])").await;
+            let _ = session.logout().await;
+            crate::attachment::extract(&fetched?.0, index)
         })
         .await
     }
@@ -268,6 +296,7 @@ pub struct FullEmail {
     /// The thread this message continues (its References header), oldest
     /// first, so a reply can extend it.
     pub references: Vec<String>,
+    pub attachments: Vec<AttachmentInfo>,
 }
 
 /// Bound an entire mail operation (connect, login, and commands) by one deadline.
@@ -360,22 +389,20 @@ pub async fn fetch_envelopes_since(
     })
 }
 
-/// Fetch a full email by UID.
-pub async fn fetch_email_by_uid(session: &mut ImapSession, uid: u32) -> AppResult<FullEmail> {
+/// A message's raw source and the server's delivery time, by UID.
+async fn fetch_raw(
+    session: &mut ImapSession,
+    uid: u32,
+    query: &str,
+) -> AppResult<(Vec<u8>, Option<DateTime<Utc>>)> {
     session
         .select("INBOX")
         .await
         .map_err(|e| AppError::Imap(format!("SELECT INBOX failed: {e}")))?;
-
-    // BODY[] (rather than BODY.PEEK[]) deliberately sets \Seen on the server:
-    // opening a message counts as reading it, as in other mail clients. The
-    // app's own "seen" marker is independent and tracks headers the user has
-    // scanned in the list.
     let messages = session
-        .uid_fetch(uid.to_string(), "(UID INTERNALDATE BODY[])")
+        .uid_fetch(uid.to_string(), query)
         .await
         .map_err(|e| AppError::Imap(format!("FETCH failed: {e}")))?;
-
     let collected: Vec<_> = messages
         .try_collect()
         .await
@@ -386,9 +413,20 @@ pub async fn fetch_email_by_uid(session: &mut ImapSession, uid: u32) -> AppResul
         .iter()
         .find(|msg| msg.uid == Some(uid))
         .ok_or_else(|| AppError::NotFound("Message not found".into()))?;
+    Ok((
+        msg.body().unwrap_or_default().to_vec(),
+        msg.internal_date().map(|d| d.with_timezone(&Utc)),
+    ))
+}
 
-    let received = msg.internal_date().map(|d| d.with_timezone(&Utc));
-    parse_message(uid, msg.body().unwrap_or_default(), received)
+/// Fetch a full email by UID.
+pub async fn fetch_email_by_uid(session: &mut ImapSession, uid: u32) -> AppResult<FullEmail> {
+    // BODY[] (rather than BODY.PEEK[]) deliberately sets \Seen on the server:
+    // opening a message counts as reading it, as in other mail clients. The
+    // app's own "seen" marker is independent and tracks headers the user has
+    // scanned in the list.
+    let (raw, received) = fetch_raw(session, uid, "(UID INTERNALDATE BODY[])").await?;
+    parse_message(uid, &raw, received)
 }
 
 /// Build a [`FullEmail`] from a raw RFC 5322 message. Headers come from the
@@ -423,6 +461,7 @@ pub fn parse_message(
             }
             _ => Vec::new(),
         },
+        attachments: crate::attachment::list(&parsed),
     })
 }
 
@@ -793,6 +832,7 @@ mod tests {
         assert_eq!(email.subject, "Quarterly numbers");
         assert_eq!(email.message_id.as_deref(), Some("abc@work.example"));
         assert_eq!(email.references, ["root@work.example", "prev@work.example"]);
+        assert!(email.attachments.is_empty());
         assert_eq!(email.body_text.as_deref().map(str::trim), Some("Hello"));
     }
 

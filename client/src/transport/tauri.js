@@ -46,5 +46,8 @@ export const transport = {
   saveContact: (request) => call('save_contact', { request }),
   deleteContact: (id) => call('delete_contact', { id }),
 
+  downloadAttachment: (accountId, uid, index) => call('save_attachment', { accountId, uid, index }),
+  showInFolder: (path) => call('show_in_folder', { path }),
+
   openExternal: (url) => call('open_external', { url }),
 };

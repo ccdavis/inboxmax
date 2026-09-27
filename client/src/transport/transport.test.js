@@ -62,6 +62,8 @@ describe('tauri transport', () => {
     await tauri.listContacts();
     await tauri.saveContact({ email: 's@x', name: 'S' });
     await tauri.deleteContact(7);
+    await tauri.downloadAttachment('a1', 12, 0);
+    await tauri.showInFolder('C:\\Downloads\\x.pdf');
 
     expect(invoke.mock.calls).toEqual([
       ['list_emails', { accountId: 'a1', since: null }],
@@ -73,6 +75,8 @@ describe('tauri transport', () => {
       ['list_contacts', { query: null }],
       ['save_contact', { request: { email: 's@x', name: 'S' } }],
       ['delete_contact', { id: 7 }],
+      ['save_attachment', { accountId: 'a1', uid: 12, index: 0 }],
+      ['show_in_folder', { path: 'C:\\Downloads\\x.pdf' }],
     ]);
   });
 

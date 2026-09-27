@@ -2,6 +2,7 @@
 //! Each one is a thin wrapper over the shared core operations, and returns
 //! the same JSON shapes so the frontend can use either transport.
 
+use crate::downloads;
 use crate::state::{DesktopState, LOCAL_USER_ID};
 use inboxmax_core::account::{self, AccountStatus, ConnectRequest, ConnectResponse};
 use inboxmax_core::contacts::{self, Contact, ContactRequest};
@@ -11,6 +12,7 @@ use inboxmax_core::mailbox::{self, EmailListResponse, RememberRequest, Remembere
 use inboxmax_core::outgoing::{SendReceipt, SendRequest};
 use inboxmax_core::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 use tauri::State;
 use tauri_plugin_opener::OpenerExt;
 
@@ -152,6 +154,55 @@ pub async fn send_email(
         request,
     )
     .await
+}
+
+#[derive(Serialize)]
+pub struct SavedFile {
+    pub path: String,
+    /// The name it was saved under, which may have a number added.
+    pub filename: String,
+}
+
+fn download_dir(app: &tauri::AppHandle) -> AppResult<std::path::PathBuf> {
+    app.path()
+        .download_dir()
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("There is no Downloads folder: {e}")))
+}
+
+/// Save an attachment in the Downloads folder, never over an existing file.
+#[tauri::command]
+pub async fn save_attachment(
+    app: tauri::AppHandle,
+    state: State<'_, DesktopState>,
+    account_id: String,
+    uid: i64,
+    index: usize,
+) -> AppResult<SavedFile> {
+    let account = state.require_account(&account_id).await?;
+    let attachment = mailbox::get_attachment(state.mail.as_ref(), &account, uid, index).await?;
+    let path =
+        downloads::save_new(&download_dir(&app)?, &attachment.filename, &attachment.data).await?;
+    Ok(SavedFile {
+        filename: path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        path: path.display().to_string(),
+    })
+}
+
+/// Show a saved attachment in the file manager. Only files in Downloads.
+#[tauri::command]
+pub fn show_in_folder(app: tauri::AppHandle, path: String) -> AppResult<()> {
+    let path = std::path::PathBuf::from(path);
+    if !downloads::is_inside(&download_dir(&app)?, &path) {
+        return Err(AppError::BadRequest(
+            "Only saved attachments can be shown".into(),
+        ));
+    }
+    app.opener()
+        .reveal_item_in_dir(&path)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Could not show the file: {e}")))
 }
 
 /// The address book, or with a query, suggestions whose address or name

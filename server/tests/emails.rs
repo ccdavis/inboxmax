@@ -4,6 +4,7 @@ use axum::http::{Request, StatusCode};
 use chrono::{NaiveDate, Utc};
 use http_body_util::BodyExt;
 use inboxmax_core::ConnectedAccount;
+use inboxmax_core::attachment::Attachment;
 use inboxmax_core::outgoing::{OutgoingEmail, SendReceipt};
 use inboxmax_server::error::{AppError, AppResult};
 use inboxmax_server::imap_client::{
@@ -87,6 +88,23 @@ impl MailFetcher for MockMailFetcher {
             body_text: Some("body".into()),
             message_id: None,
             references: vec![],
+            attachments: vec![],
+        })
+    }
+
+    async fn fetch_attachment(
+        &self,
+        _credentials: &MailCredentials,
+        uid: u32,
+        index: usize,
+    ) -> AppResult<Attachment> {
+        if (uid, index) != (100, 0) {
+            return Err(AppError::NotFound("Attachment not found".into()));
+        }
+        Ok(Attachment {
+            filename: "Grüße \"final\".pdf".into(),
+            content_type: "application/pdf".into(),
+            data: b"%PDF-1.4".to_vec(),
         })
     }
 
@@ -789,6 +807,72 @@ async fn the_address_book_is_private() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn attachments_download_under_their_names_and_never_render() {
+    let state = build_state(sample_envelopes()).await;
+    let response = build_app(state.clone())
+        .oneshot(emails_request(&format!(
+            "/api/accounts/{ACCOUNT_ID}/emails/100/attachments/0"
+        )))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers().clone();
+    assert_eq!(headers["content-type"], "application/pdf");
+    assert_eq!(
+        headers["content-disposition"],
+        "attachment; filename=\"Gr__e _final_.pdf\"; filename*=UTF-8''Gr%C3%BC%C3%9Fe%20_final_.pdf"
+    );
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    assert_eq!(headers["content-security-policy"], "sandbox");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"%PDF-1.4");
+
+    let missing = build_app(state.clone())
+        .oneshot(emails_request(&format!(
+            "/api/accounts/{ACCOUNT_ID}/emails/100/attachments/9"
+        )))
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    let signed_out = build_app(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/accounts/{ACCOUNT_ID}/emails/100/attachments/0"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(signed_out.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn sends_attachments_larger_than_the_default_request_limit() {
+    use base64::Engine;
+    let mail = Arc::new(MockMailFetcher::with_envelopes(vec![]));
+    let state = build_state_with(mail.clone()).await;
+    // Three megabytes: past axum's default two-megabyte body limit.
+    let data = base64::engine::general_purpose::STANDARD.encode(vec![7u8; 3 * 1024 * 1024]);
+    let response = build_app(state)
+        .oneshot(send_request(
+            serde_json::json!({
+                "to": [{ "name": null, "email": "a@example.com" }],
+                "subject": "Big",
+                "attachments": [{ "filename": "big.bin", "data": data }],
+            }),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let sent = mail.sent.lock().unwrap();
+    assert_eq!(sent[0].1.attachments[0].data.len(), 3 * 1024 * 1024);
 }
 
 #[tokio::test]

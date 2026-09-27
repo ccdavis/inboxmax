@@ -45,5 +45,14 @@ export const listContacts = () => transport.listContacts();
 export const saveContact = (contact) => transport.saveContact(contact);
 export const deleteContact = (id) => transport.deleteContact(id);
 
+/**
+ * Download one attachment of a message. The web app hands it to the
+ * browser (resolving to null); the desktop app saves it in Downloads and
+ * resolves to { path, filename }.
+ */
+export const downloadAttachment = (accountId, uid, index) => transport.downloadAttachment(accountId, uid, index);
+/** Desktop: show a saved attachment in the file manager. */
+export const showInFolder = (path) => transport.showInFolder(path);
+
 /** Open a link from an email outside the app. */
 export const openExternal = (url) => transport.openExternal(url);

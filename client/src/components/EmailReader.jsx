@@ -5,6 +5,7 @@ import Spinner from './Spinner';
 import { formatFullDate } from '../utils/dates';
 import { sameMailboxes } from '../utils/addresses';
 import { hasOtherRecipients } from '../utils/replies';
+import { formatSize } from '../utils/files';
 
 function sanitizeEmailHtml(html) {
   // No img, style or class attributes: remote images and CSS backgrounds are
@@ -117,6 +118,62 @@ export function MessageHeaders({ email }) {
   );
 }
 
+/**
+ * The message's attachments, each downloadable. The desktop app saves into
+ * Downloads and says where, with a way to show the file.
+ */
+function AttachmentList({ accountId, uid, attachments }) {
+  const [saved, setSaved] = useState(null);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(null);
+  if (!attachments?.length) return null;
+
+  const download = async (attachment) => {
+    setError(null);
+    setBusy(attachment.index);
+    try {
+      setSaved(await api.downloadAttachment(accountId, uid, attachment.index));
+    } catch (caught) {
+      setError(`Could not download ${attachment.filename}: ${caught.message}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const show = () => api.showInFolder(saved.path).catch((caught) => setError(caught.message));
+
+  return (
+    <section aria-label="Attachments" className="mt-3">
+      <ul className="flex flex-wrap gap-2">
+        {attachments.map((attachment) => (
+          <li key={attachment.index}>
+            <button
+              type="button"
+              onClick={() => download(attachment)}
+              disabled={busy === attachment.index}
+              className="flex max-w-xs items-center gap-2 rounded-lg border border-line px-3 py-1.5 text-left text-sm hover:bg-hover disabled:opacity-50 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+              aria-label={`Download ${attachment.filename}, ${formatSize(attachment.size)}`}
+            >
+              <span aria-hidden="true">📎</span>
+              <span className="min-w-0 truncate text-ink">{attachment.filename}</span>
+              <span className="shrink-0 text-xs text-ink-muted">{formatSize(attachment.size)}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      {saved && (
+        <p role="status" className="mt-2 flex flex-wrap items-center gap-2 text-sm text-ink-soft">
+          Saved {saved.filename} in Downloads.
+          <button type="button" onClick={show} className="text-accent hover:text-accent-hover underline-offset-2 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded">
+            Show in folder
+          </button>
+        </p>
+      )}
+      {error && <p role="alert" className="mt-2 text-sm text-danger-ink">{error}</p>}
+    </section>
+  );
+}
+
 function ActionButton({ onClick, icon, children }) {
   return (
     <button
@@ -221,6 +278,7 @@ export default function EmailReader({ accountId, emailUid, onBack, me, onReply }
           {email.subject || '(no subject)'}
         </h1>
         <MessageHeaders email={email} />
+        <AttachmentList key={email.uid} accountId={accountId} uid={email.uid} attachments={email.attachments} />
         {onReply && (
           <div className="mt-3 flex flex-wrap gap-2">
             <ActionButton icon="↩" onClick={() => onReply('reply', email)}>Reply</ActionButton>

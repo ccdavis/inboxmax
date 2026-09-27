@@ -6,6 +6,7 @@
 
 mod commands;
 mod credentials;
+mod downloads;
 mod state;
 
 use inboxmax_core::fake_mail::WithDemoMailbox;
@@ -75,6 +76,8 @@ pub fn run() {
             commands::get_email,
             commands::search_emails,
             commands::send_email,
+            commands::save_attachment,
+            commands::show_in_folder,
             commands::list_contacts,
             commands::save_contact,
             commands::delete_contact,
