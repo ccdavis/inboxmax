@@ -55,10 +55,20 @@ fn is_automated(email: &str) -> bool {
         || domain.to_ascii_lowercase().starts_with("reply.")
 }
 
+/// Longer than any real display name.
+const MAX_NAME_CHARS: usize = 100;
+/// A message names only a sender or two; more is not someone to remember.
+const MAX_PEOPLE_PER_MESSAGE: usize = 4;
+
 fn clean_name(name: Option<&str>) -> Option<String> {
-    name.map(|n| n.chars().filter(|c| !c.is_control()).collect::<String>())
-        .map(|n| n.trim().to_string())
-        .filter(|n| !n.is_empty())
+    name.map(|n| {
+        n.chars()
+            .filter(|&c| !c.is_control() && !crate::attachment::is_invisible_format(c))
+            .collect::<String>()
+    })
+    .map(|n| n.trim().chars().take(MAX_NAME_CHARS).collect::<String>())
+    .map(|n| n.trim_end().to_string())
+    .filter(|n| !n.is_empty())
 }
 
 /// Remember everyone a message was sent to. Sending counts toward ranking,
@@ -92,26 +102,32 @@ pub async fn record_sent(
 
 /// Remember the people behind a message the user opened (its sender and
 /// Reply-To), skipping automated senders and the user's own `mailboxes`.
-/// The name in the message updates the entry unless the user set one.
+/// A name in the message fills in a missing one but never replaces one:
+/// anyone can put any name on a message, "Your Boss" included.
 pub async fn record_seen(
     db: &SqlitePool,
     user_id: &str,
     people: &[MailAddress],
     mailboxes: &[&str],
 ) -> AppResult<()> {
+    let mut recorded = 0;
     for person in people {
+        if recorded == MAX_PEOPLE_PER_MESSAGE {
+            break;
+        }
         let Ok(email) = normalize_email(&person.email) else {
             continue;
         };
         if is_automated(&email) || mailboxes.iter().any(|own| own.eq_ignore_ascii_case(&email)) {
             continue;
         }
+        recorded += 1;
         sqlx::query(
             "INSERT INTO contacts (user_id, email, name, last_used)
              VALUES (?, ?, ?, unixepoch())
              ON CONFLICT(user_id, email) DO UPDATE SET
                last_used = excluded.last_used,
-               name = CASE WHEN contacts.name_locked OR excluded.name IS NULL
+               name = CASE WHEN contacts.name_locked OR contacts.name IS NOT NULL
                            THEN contacts.name ELSE excluded.name END",
         )
         .bind(user_id)
@@ -457,5 +473,42 @@ mod tests {
             emails(&search(&db, "u", "100%").await.unwrap()),
             ["100%@x.example"]
         );
+    }
+
+    #[tokio::test]
+    async fn mail_cannot_rename_people_or_flood_the_book() {
+        let db = db().await;
+        record_seen(
+            &db,
+            "u",
+            &[addr(Some("Pat Boss"), "boss@corp.example")],
+            &[],
+        )
+        .await
+        .unwrap();
+        // A spoofed message under the boss's address, with a disguised name.
+        record_seen(
+            &db,
+            "u",
+            &[addr(Some("Evil\u{202E}lived"), "boss@corp.example")],
+            &[],
+        )
+        .await
+        .unwrap();
+        let book = list(&db, "u").await.unwrap();
+        assert_eq!(book[0].name.as_deref(), Some("Pat Boss"));
+
+        let crowd: Vec<_> = (0..50)
+            .map(|n| addr(Some(&"x".repeat(500)), &format!("p{n}@crowd.example")))
+            .collect();
+        record_seen(&db, "u", &crowd, &[]).await.unwrap();
+        let book = list(&db, "u").await.unwrap();
+        assert_eq!(book.len(), 1 + MAX_PEOPLE_PER_MESSAGE);
+        assert!(book.iter().all(|c| {
+            c.name
+                .as_ref()
+                .is_none_or(|n| n.chars().count() <= MAX_NAME_CHARS)
+        }));
+        assert_eq!(clean_name(Some("A\u{202E}B")).as_deref(), Some("AB"));
     }
 }

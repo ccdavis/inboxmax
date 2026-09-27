@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+/// More than any real message carries.
+const MAX_FORWARDED_ATTACHMENTS: usize = 100;
 
 #[derive(Debug, Serialize)]
 pub struct EmailListResponse {
@@ -321,18 +323,27 @@ pub async fn send(
     // A forward's attachments come straight from the original message.
     if let Some(forward) = forward {
         let uid = validate_uid(forward.uid)?;
-        let mut originals = Vec::with_capacity(forward.indexes.len());
+        // Each attachment once, a bounded number of them, and the size
+        // checked as each arrives, so no request can pile up downloads.
+        let mut indexes = forward.indexes;
+        indexes.sort_unstable();
+        indexes.dedup();
+        if indexes.len() > MAX_FORWARDED_ATTACHMENTS {
+            return Err(AppError::BadRequest(format!(
+                "A message can forward at most {MAX_FORWARDED_ATTACHMENTS} attachments"
+            )));
+        }
         let credentials = account.mail_credentials();
-        for index in forward.indexes {
-            originals.push(match forward.folder {
+        for index in indexes {
+            let original = match forward.folder {
                 Some(folder) => {
                     mail.fetch_folder_attachment(&credentials, folder, uid, index)
                         .await?
                 }
                 None => mail.fetch_attachment(&credentials, uid, index).await?,
-            });
+            };
+            email.attach(vec![original])?;
         }
-        email.attach(originals)?;
     }
     let receipt = mail
         .send(&account.mail_credentials(), &account.smtp, &email)

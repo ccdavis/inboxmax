@@ -369,13 +369,16 @@ impl MailFetcher for RealMailFetcher {
             true
         } else {
             let copy = email.message(true)?.formatted();
-            let filed = run_with_timeout(async {
+            // Uploading a large message takes a while on a slow line.
+            let deadline = MAIL_OPERATION_TIMEOUT + upload_time(copy.len());
+            let filed = timeout(deadline, async {
                 let mut session = connect(credentials).await?;
                 let filed = file_in_sent(&mut session, &copy, &email.message_id).await;
                 let _ = session.logout().await;
                 filed
             })
-            .await;
+            .await
+            .unwrap_or_else(|_| Err(AppError::Imap("Mail operation timed out".into())));
             filed.unwrap_or_else(|e| {
                 tracing::warn!(
                     "Sent, but could not file a copy for {}: {e}",
@@ -536,14 +539,14 @@ fn locate(folders: &[async_imap::types::Name], kind: Folder) -> Option<String> {
             &[|a| matches!(a, NameAttribute::Drafts)],
             DRAFTS_FOLDER_NAMES,
         ),
+        // A folder meant for archiving, by role or name, before all mail
+        // (Gmail's archive), which elsewhere may be a virtual folder.
         Folder::Archive => find_folder(
             folders,
-            &[
-                |a| matches!(a, NameAttribute::Archive),
-                |a| matches!(a, NameAttribute::All),
-            ],
+            &[|a| matches!(a, NameAttribute::Archive)],
             ARCHIVE_FOLDER_NAMES,
-        ),
+        )
+        .or_else(|| find_folder(folders, &[|a| matches!(a, NameAttribute::All)], &[])),
         Folder::Trash => find_folder(
             folders,
             &[|a| matches!(a, NameAttribute::Trash)],
@@ -566,13 +569,43 @@ async fn folder_for(session: &mut ImapSession, folder: Folder) -> AppResult<Stri
         return Ok(name);
     }
     if folder == Folder::Archive {
+        let listed: Vec<(&str, Option<&str>)> =
+            folders.iter().map(|f| (f.name(), f.delimiter())).collect();
+        let name = new_folder_name(&listed, "Archive");
         session
-            .create("Archive")
+            .create(&name)
             .await
-            .map_err(|e| AppError::Imap(format!("Could not create Archive: {e}")))?;
-        return Ok("Archive".into());
+            .map_err(|e| AppError::Imap(format!("Could not create {name}: {e}")))?;
+        // Some mail programs show only subscribed folders.
+        if let Err(e) = session.subscribe(&name).await {
+            tracing::debug!("Could not subscribe to {name}: {e}");
+        }
+        return Ok(name);
     }
     Err(no_such_folder(folder))
+}
+
+/// Where a new top-level folder called `leaf` goes: under INBOX on servers
+/// that keep every folder there (Courier, some Cyrus), else at the top.
+/// `listed` is each folder's name and hierarchy delimiter.
+fn new_folder_name(listed: &[(&str, Option<&str>)], leaf: &str) -> String {
+    let delimiter = listed.iter().find_map(|(_, d)| *d).unwrap_or(".");
+    let prefix = format!("INBOX{delimiter}");
+    let mut others = listed
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| !name.eq_ignore_ascii_case("INBOX"))
+        .peekable();
+    let under_inbox = others.peek().is_some()
+        && others.all(|name| {
+            name.get(..prefix.len())
+                .is_some_and(|start| start.eq_ignore_ascii_case(&prefix))
+        });
+    if under_inbox {
+        format!("{prefix}{leaf}")
+    } else {
+        leaf.to_string()
+    }
 }
 
 /// A folder the server already has; looking never creates one.
@@ -585,8 +618,17 @@ fn no_such_folder(folder: Folder) -> AppError {
     AppError::NotFound(format!("The mail server has no {} folder", folder.label()))
 }
 
+/// A mailbox name as an IMAP quoted string. (async-imap quotes the name for
+/// SELECT and MOVE, but sends COPY's as given.)
+fn quoted_mailbox(name: &str) -> String {
+    format!("\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 /// Move one message out of the selected folder. Uses MOVE where the server
-/// has it, else copies, marks the original deleted, and expunges it.
+/// has it, else copies it and marks the original deleted. The original is
+/// expunged only where UIDPLUS can expunge it alone: a plain EXPUNGE would
+/// also remove anything another mail program had marked deleted. Listings
+/// leave out messages marked deleted.
 async fn move_uid(session: &mut ImapSession, uid: u32, to: &str) -> AppResult<()> {
     let capabilities = session
         .capabilities()
@@ -600,7 +642,7 @@ async fn move_uid(session: &mut ImapSession, uid: u32, to: &str) -> AppResult<()
             .map_err(|e| AppError::Imap(format!("MOVE to {to} failed: {e}")));
     }
     session
-        .uid_copy(&uid, to)
+        .uid_copy(&uid, quoted_mailbox(to))
         .await
         .map_err(|e| AppError::Imap(format!("COPY to {to} failed: {e}")))?;
     session
@@ -610,33 +652,35 @@ async fn move_uid(session: &mut ImapSession, uid: u32, to: &str) -> AppResult<()
         .try_collect::<Vec<_>>()
         .await
         .map_err(|e| AppError::Imap(format!("STORE failed: {e}")))?;
-    let expunged = if capabilities.has_str("UIDPLUS") {
-        session
-            .uid_expunge(&uid)
-            .await
-            .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {e}")))?
-            .try_collect::<Vec<_>>()
-            .await
-            .map(|_| ())
-    } else {
-        session
-            .expunge()
-            .await
-            .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {e}")))?
-            .try_collect::<Vec<_>>()
-            .await
-            .map(|_| ())
-    };
-    expunged.map_err(|e| AppError::Imap(format!("EXPUNGE failed: {e}")))
+    if !capabilities.has_str("UIDPLUS") {
+        return Ok(());
+    }
+    session
+        .uid_expunge(&uid)
+        .await
+        .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {e}")))?
+        .try_collect::<Vec<_>>()
+        .await
+        .map(|_| ())
+        .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {e}")))
 }
 
 /// UIDs in the selected folder with this Message-ID, newest first.
 async fn find_message_id(session: &mut ImapSession, message_id: &str) -> AppResult<Vec<u32>> {
+    // HEADER matches substrings: with the angle brackets, "123@x" cannot
+    // match "<99123@x>", and nothing left to search for matches nothing
+    // rather than every message.
+    let id = sanitize_imap_query(
+        message_id
+            .trim()
+            .trim_start_matches('<')
+            .trim_end_matches('>'),
+    );
+    if id.trim().is_empty() {
+        return Ok(Vec::new());
+    }
     let mut uids: Vec<u32> = session
-        .uid_search(format!(
-            "HEADER Message-ID \"{}\"",
-            sanitize_imap_query(message_id)
-        ))
+        .uid_search(format!("HEADER Message-ID \"<{id}>\""))
         .await
         .map_err(|e| AppError::Imap(format!("SEARCH failed: {e}")))?
         .into_iter()
@@ -726,6 +770,11 @@ pub struct FullEmail {
     pub attachments: Vec<AttachmentInfo>,
 }
 
+/// Extra time to upload `bytes`, at a slow 1 Mbit/s.
+fn upload_time(bytes: usize) -> Duration {
+    Duration::from_secs((bytes as u64).div_ceil(125_000))
+}
+
 /// Bound an entire mail operation (connect, login, and commands) by one deadline.
 async fn run_with_timeout<T>(future: impl Future<Output = AppResult<T>>) -> AppResult<T> {
     timeout(MAIL_OPERATION_TIMEOUT, future)
@@ -775,7 +824,9 @@ pub async fn fetch_envelopes_since(
         .map_err(|e| AppError::Imap(format!("SELECT INBOX failed: {e}")))?;
 
     let date_str = since.format("%d-%b-%Y").to_string();
-    let search_query = format!("SINCE {date_str}");
+    // Messages marked deleted (by a move on a server without UIDPLUS, or by
+    // another client) are on their way out.
+    let search_query = format!("SINCE {date_str} UNDELETED");
 
     let uids = session
         .uid_search(&search_query)
@@ -922,8 +973,9 @@ async fn newest_matching(
     limit: usize,
 ) -> AppResult<Vec<EmailEnvelope>> {
     select(session, mailbox).await?;
+    // Search keys are ANDed; any CHARSET has to stay first.
     let uids = session
-        .uid_search(criteria)
+        .uid_search(format!("{criteria} UNDELETED"))
         .await
         .map_err(|e| AppError::Imap(format!("SEARCH failed: {e}")))?;
 
@@ -1141,12 +1193,42 @@ fn parse_imap_date(date: Option<&std::borrow::Cow<'_, [u8]>>) -> Option<DateTime
 #[cfg(test)]
 mod tests {
     use super::{
-        MailAddress, build_search_query, decode_header_text, is_public_ip, newest_uid_strings,
-        parse_message,
+        MailAddress, build_search_query, decode_header_text, is_public_ip, new_folder_name,
+        newest_uid_strings, parse_message, quoted_mailbox,
     };
     use chrono::{TimeZone, Utc};
     use std::borrow::Cow;
     use std::net::IpAddr;
+
+    #[test]
+    fn a_new_archive_goes_where_the_server_keeps_folders() {
+        let top = [
+            ("INBOX", Some("/")),
+            ("Sent", Some("/")),
+            ("Trash", Some("/")),
+        ];
+        assert_eq!(new_folder_name(&top, "Archive"), "Archive");
+        let under_inbox = [
+            ("INBOX", Some(".")),
+            ("INBOX.Sent", Some(".")),
+            ("inbox.Trash", Some(".")),
+        ];
+        assert_eq!(new_folder_name(&under_inbox, "Archive"), "INBOX.Archive");
+        // Mixed, or only INBOX: the top level.
+        let mixed = [
+            ("INBOX", Some(".")),
+            ("INBOX.Sent", Some(".")),
+            ("Trash", Some(".")),
+        ];
+        assert_eq!(new_folder_name(&mixed, "Archive"), "Archive");
+        assert_eq!(new_folder_name(&[("INBOX", None)], "Archive"), "Archive");
+    }
+
+    #[test]
+    fn mailbox_names_are_quoted_for_copy() {
+        assert_eq!(quoted_mailbox("Deleted Items"), "\"Deleted Items\"");
+        assert_eq!(quoted_mailbox(r#"a"b\c"#), r#""a\"b\\c""#);
+    }
 
     #[test]
     fn blocks_non_public_connection_targets() {

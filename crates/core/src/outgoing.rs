@@ -491,7 +491,7 @@ mod tests {
         assert_eq!(
             listed,
             [
-                ("notes.txt", "text/plain", 5),
+                ("notes.txt", "text/plain; charset=utf-8", 5),
                 ("_photo.jpg", "application/octet-stream", 3),
                 ("Invoice-1042.pdf", "application/pdf", 8),
             ]

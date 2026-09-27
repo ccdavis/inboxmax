@@ -10,7 +10,10 @@ use sqlx::SqlitePool;
 
 /// A draft may hold as much as a message can send (its attachments are in
 /// the content), with room for the text.
-pub const MAX_DRAFT_BYTES: usize = crate::outgoing::MAX_ATTACHMENT_BYTES / 3 * 4 + 2 * 1024 * 1024;
+pub const MAX_DRAFT_BYTES: usize = crate::outgoing::MAX_ATTACHMENT_BYTES / 3 * 4 + 4 * 1024 * 1024;
+/// Drafts a mailbox can keep, and how much they can hold in all.
+pub const MAX_DRAFTS: i64 = 100;
+pub const MAX_DRAFTS_TOTAL_BYTES: i64 = 200 * 1024 * 1024;
 
 /// A draft as the list shows it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -44,8 +47,7 @@ fn check_id(id: &str) -> AppResult<()> {
     }
 }
 
-fn summary(id: String, content: &str, updated_at: i64) -> DraftSummary {
-    let content: Value = serde_json::from_str(content).unwrap_or(Value::Null);
+fn summary(id: String, content: &Value, updated_at: i64) -> DraftSummary {
     DraftSummary {
         id,
         subject: content["subject"].as_str().unwrap_or_default().to_string(),
@@ -56,8 +58,13 @@ fn summary(id: String, content: &str, updated_at: i64) -> DraftSummary {
 
 /// The mailbox's drafts, most recently changed first.
 pub async fn list(db: &SqlitePool, account_id: &str) -> AppResult<Vec<DraftSummary>> {
-    let rows: Vec<(String, String, i64)> = sqlx::query_as(
-        "SELECT id, content, updated_at FROM drafts
+    // Only the subject and recipients, not the whole (attachment-laden) drafts.
+    let rows: Vec<(String, Option<String>, Option<String>, i64)> = sqlx::query_as(
+        "SELECT id,
+                CASE json_type(content, '$.subject') WHEN 'text' THEN json_extract(content, '$.subject') END,
+                CASE json_type(content, '$.to') WHEN 'array' THEN json_extract(content, '$.to') END,
+                updated_at
+         FROM drafts
          WHERE account_id = ? ORDER BY updated_at DESC, rowid DESC",
     )
     .bind(account_id)
@@ -65,7 +72,14 @@ pub async fn list(db: &SqlitePool, account_id: &str) -> AppResult<Vec<DraftSumma
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, content, updated_at)| summary(id, &content, updated_at))
+        .map(|(id, subject, to, updated_at)| DraftSummary {
+            id,
+            subject: subject.unwrap_or_default(),
+            to: to
+                .and_then(|to| serde_json::from_str(&to).ok())
+                .unwrap_or_default(),
+            updated_at,
+        })
         .collect())
 }
 
@@ -86,8 +100,8 @@ pub async fn get(db: &SqlitePool, account_id: &str, id: &str) -> AppResult<Draft
     })
 }
 
-/// Create or replace a draft. A draft id already used by another mailbox is
-/// refused rather than moved.
+/// Create or replace a draft, within the mailbox's quota. A draft id already
+/// used by another mailbox is refused (as not found) rather than moved.
 pub async fn save(
     db: &SqlitePool,
     account_id: &str,
@@ -104,6 +118,20 @@ pub async fn save(
             "The draft is too large to save".into(),
         ));
     }
+    // Room for this one among the mailbox's other drafts.
+    let (others, others_bytes): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), COALESCE(SUM(length(CAST(content AS BLOB))), 0) FROM drafts
+         WHERE account_id = ? AND id != ?",
+    )
+    .bind(account_id)
+    .bind(id)
+    .fetch_one(db)
+    .await?;
+    if others >= MAX_DRAFTS || others_bytes + text.len() as i64 > MAX_DRAFTS_TOTAL_BYTES {
+        return Err(AppError::BadRequest(
+            "There are too many drafts to save another: send or discard some".into(),
+        ));
+    }
     let saved: Option<i64> = sqlx::query_scalar(
         "INSERT INTO drafts (id, account_id, content, updated_at) VALUES (?, ?, ?, unixepoch())
          ON CONFLICT(id) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at
@@ -115,9 +143,9 @@ pub async fn save(
     .bind(&text)
     .fetch_optional(db)
     .await?;
-    let updated_at =
-        saved.ok_or_else(|| AppError::Conflict("This draft belongs to another mailbox".into()))?;
-    Ok(summary(id.to_string(), &text, updated_at))
+    // The id belongs to another mailbox; saying so would tell that it exists.
+    let updated_at = saved.ok_or_else(|| AppError::NotFound("Draft not found".into()))?;
+    Ok(summary(id.to_string(), content, updated_at))
 }
 
 /// Remove a draft. Removing one that is already gone is fine (a sent
@@ -224,7 +252,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             save(&db, "home", A, &json!({ "body": "hijack" })).await,
-            Err(AppError::Conflict(_))
+            Err(AppError::NotFound(_))
         ));
         assert!(matches!(
             get(&db, "home", A).await,
@@ -251,5 +279,38 @@ mod tests {
             save(&db, "work", A, &huge).await.unwrap_err().to_string(),
             "The draft is too large to save"
         );
+    }
+
+    #[tokio::test]
+    async fn a_mailbox_keeps_only_so_many_drafts() {
+        let db = db().await;
+        let id = |n: i64| format!("{n:08x}-0000-4000-8000-000000000000");
+        for n in 0..MAX_DRAFTS {
+            save(&db, "work", &id(n), &json!({ "subject": format!("#{n}") }))
+                .await
+                .unwrap();
+        }
+        assert!(matches!(
+            save(&db, "work", &id(MAX_DRAFTS), &json!({})).await,
+            Err(AppError::BadRequest(_))
+        ));
+        // Changing one it has is fine, and so is another mailbox.
+        save(&db, "work", &id(0), &json!({ "subject": "changed" }))
+            .await
+            .unwrap();
+        save(&db, "home", &id(MAX_DRAFTS), &json!({}))
+            .await
+            .unwrap();
+
+        let listed = list(&db, "work").await.unwrap();
+        assert_eq!(listed.len() as i64, MAX_DRAFTS);
+        assert!(listed.iter().any(|d| d.subject == "changed"));
+        // Odd content lists as blank rather than failing.
+        save(&db, "home", A, &json!({ "subject": 5, "to": "x" }))
+            .await
+            .unwrap();
+        let home = list(&db, "home").await.unwrap();
+        let odd = home.iter().find(|d| d.id == A).unwrap();
+        assert_eq!((odd.subject.as_str(), odd.to.len()), ("", 0));
     }
 }

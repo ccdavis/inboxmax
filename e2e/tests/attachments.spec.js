@@ -71,8 +71,8 @@ test('files attached while composing are sent', async ({ page }) => {
   expect(sent.attachments.map(({ filename, content_type, data }) => [
     filename, content_type, Buffer.from(data, 'base64').toString(),
   ])).toEqual([
-    ['report.csv', 'text/csv', 'month,total\nMay,42\n'],
-    ['Grüße.txt', 'text/plain', 'Hallo'],
+    ['report.csv', 'text/csv; charset=utf-8', 'month,total\nMay,42\n'],
+    ['Grüße.txt', 'text/plain; charset=utf-8', 'Hallo'],
   ]);
 });
 

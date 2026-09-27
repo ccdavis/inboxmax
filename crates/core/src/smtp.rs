@@ -5,7 +5,9 @@ use crate::error::{AppError, AppResult};
 use crate::imap_client::{MailCredentials, SmtpServer, resolve_public_address};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::transport::smtp::client::{Tls, TlsParameters};
+use lettre::transport::smtp::extension::ClientId;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 const SMTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -36,6 +38,9 @@ pub async fn send(
                 credentials.email.clone(),
                 credentials.password.clone(),
             ))
+            // Not the machine's own name, which would go into every message's
+            // Received header.
+            .hello_name(ClientId::Ipv4(Ipv4Addr::LOCALHOST))
             .timeout(Some(SMTP_TIMEOUT))
             .build();
     transport

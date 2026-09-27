@@ -1100,9 +1100,10 @@ mod tests {
             book,
             [(
                 "sarah.chen@acme.example".to_string(),
-                Some("Sarah Chen".to_string())
+                Some("Sarah Chen (acme.example)".to_string())
             )],
-            "Sarah once (as sender and as Reply-To); the calendar and GitHub robots are skipped"
+            "Sarah once (as sender and as Reply-To), under the first name seen; \
+             the calendar and GitHub robots are skipped"
         );
     }
 
@@ -1629,5 +1630,48 @@ mod tests {
         // Starting the demo over makes it wait again.
         arrives_at(true);
         assert!(!uids(&demo).contains(&ARRIVAL_UID));
+    }
+
+    #[tokio::test]
+    async fn a_forward_fetches_each_attachment_once_and_only_so_many() {
+        let db = db().await;
+        let account = connected("dedupe@example.com");
+        let stripe = 1000
+            - MESSAGES
+                .iter()
+                .position(|m| m.subject.starts_with("Invoice"))
+                .unwrap() as i64;
+        let forward = |indexes: Vec<usize>| crate::outgoing::SendRequest {
+            to: vec![MailAddress::new(None, "accounts@acme.example")],
+            forward: Some(crate::outgoing::ForwardedAttachments {
+                uid: stripe,
+                indexes,
+                folder: None,
+            }),
+            ..Default::default()
+        };
+        mailbox::send(
+            &db,
+            &FakeMailFetcher,
+            "u",
+            &account,
+            forward(vec![1, 1, 1, 0, 1]),
+        )
+        .await
+        .unwrap();
+        let sent = sent_messages("dedupe@example.com");
+        let names: Vec<_> = sent[0].attachments.iter().map(|a| &a.filename).collect();
+        assert_eq!(names, ["Invoice-1042.pdf", "Receipt-1042.pdf"]);
+
+        let too_many = mailbox::send(
+            &db,
+            &FakeMailFetcher,
+            "u",
+            &account,
+            forward((0..=100).collect()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(too_many, AppError::BadRequest(_)));
     }
 }
