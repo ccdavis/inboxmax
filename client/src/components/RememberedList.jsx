@@ -36,6 +36,7 @@ export default function RememberedList({ remembered, selectedUid, onForget, onSe
                   type="button"
                   data-closes-sidebar
                   onClick={() => onSelect(r.email_uid)}
+                  aria-label={`${r.sender || 'Unknown'}: ${subject}`}
                   aria-current={selected ? 'true' : undefined}
                   className="min-w-0 flex-1 text-left text-sm truncate pl-3 py-1.5 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500"
                 >

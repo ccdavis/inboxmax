@@ -55,6 +55,12 @@ export const transport = {
     request(`${account(accountId)}/search?q=${encodeURIComponent(query)}`),
   setWatermark: (accountId, uid) => request(`${account(accountId)}/watermark`, json('PUT', { uid })),
   sendEmail: (accountId, message) => request(`${account(accountId)}/send`, json('POST', message)),
+  listDrafts: (accountId) => request(`${account(accountId)}/drafts`),
+  getDraft: (accountId, draftId) => request(`${account(accountId)}/drafts/${encodeURIComponent(draftId)}`),
+  saveDraft: (accountId, draftId, content) =>
+    request(`${account(accountId)}/drafts/${encodeURIComponent(draftId)}`, json('PUT', { content })),
+  deleteDraft: (accountId, draftId) =>
+    request(`${account(accountId)}/drafts/${encodeURIComponent(draftId)}`, { method: 'DELETE' }),
   moveEmail: (accountId, uid, to) => request(`${account(accountId)}/emails/${encodeURIComponent(uid)}/move`, json('POST', { to })),
   restoreEmail: (accountId, from, messageId) => request(`${account(accountId)}/restore`, json('POST', { from, message_id: messageId })),
 

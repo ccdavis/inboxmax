@@ -924,6 +924,67 @@ async fn moving_needs_a_mail_client_that_can_and_a_known_folder() {
 }
 
 #[tokio::test]
+async fn drafts_are_saved_listed_and_removed_per_mailbox() {
+    let state = build_state(sample_envelopes()).await;
+    let id = "44444444-4444-4444-8444-444444444444";
+    let uri = format!("/api/accounts/{ACCOUNT_ID}/drafts/{id}");
+    let request = |method: &str, uri: &str, body: Option<Value>| {
+        Request::builder()
+            .uri(uri)
+            .method(method)
+            .header("Content-Type", "application/json")
+            .header("Cookie", format!("inboxmax_session={SESSION_TOKEN}"))
+            .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
+            .unwrap()
+    };
+    // Bigger than the default request limit: drafts hold their attachments.
+    let big = "x".repeat(3 * 1024 * 1024);
+    let saved = build_app(state.clone())
+        .oneshot(request(
+            "PUT",
+            &uri,
+            Some(serde_json::json!({ "content": { "subject": "Plans", "to": [], "body": big } })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+    assert_eq!(parse_response(saved).await["subject"], "Plans");
+
+    let listed = parse_response(
+        build_app(state.clone())
+            .oneshot(request(
+                "GET",
+                &format!("/api/accounts/{ACCOUNT_ID}/drafts"),
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(listed[0]["id"], id);
+
+    let draft = parse_response(
+        build_app(state.clone())
+            .oneshot(request("GET", &uri, None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(draft["content"]["body"].as_str().unwrap().len(), big.len());
+
+    let deleted = build_app(state.clone())
+        .oneshot(request("DELETE", &uri, None))
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::OK);
+    let gone = build_app(state)
+        .oneshot(request("GET", &uri, None))
+        .await
+        .unwrap();
+    assert_eq!(gone.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn sending_requires_a_signed_in_session() {
     let mail = Arc::new(MockMailFetcher::with_envelopes(vec![]));
     let state = build_state_with(mail.clone()).await;

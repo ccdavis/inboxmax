@@ -6,6 +6,7 @@ use crate::downloads;
 use crate::state::{DesktopState, LOCAL_USER_ID};
 use inboxmax_core::account::{self, AccountStatus, ConnectRequest, ConnectResponse};
 use inboxmax_core::contacts::{self, Contact, ContactRequest};
+use inboxmax_core::drafts::{self, Draft, DraftSummary};
 use inboxmax_core::fake_mail::{self, DEMO_EMAIL, DEMO_HOST, DEMO_PASSWORD};
 use inboxmax_core::imap_client::{EmailEnvelope, Folder, FullEmail};
 use inboxmax_core::mailbox::{self, EmailListResponse, RememberRequest, RememberedEmail, Restored};
@@ -154,6 +155,46 @@ pub async fn send_email(
         request,
     )
     .await
+}
+
+#[tauri::command]
+pub async fn list_drafts(
+    state: State<'_, DesktopState>,
+    account_id: String,
+) -> AppResult<Vec<DraftSummary>> {
+    let account = state.require_account(&account_id).await?;
+    drafts::list(&state.db, &account.id).await
+}
+
+#[tauri::command]
+pub async fn get_draft(
+    state: State<'_, DesktopState>,
+    account_id: String,
+    draft_id: String,
+) -> AppResult<Draft> {
+    let account = state.require_account(&account_id).await?;
+    drafts::get(&state.db, &account.id, &draft_id).await
+}
+
+#[tauri::command]
+pub async fn save_draft(
+    state: State<'_, DesktopState>,
+    account_id: String,
+    draft_id: String,
+    content: serde_json::Value,
+) -> AppResult<DraftSummary> {
+    let account = state.require_account(&account_id).await?;
+    drafts::save(&state.db, &account.id, &draft_id, &content).await
+}
+
+#[tauri::command]
+pub async fn delete_draft(
+    state: State<'_, DesktopState>,
+    account_id: String,
+    draft_id: String,
+) -> AppResult<()> {
+    let account = state.require_account(&account_id).await?;
+    drafts::delete(&state.db, &account.id, &draft_id).await
 }
 
 /// Move a message to Trash or the archive.

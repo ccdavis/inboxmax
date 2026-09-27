@@ -15,6 +15,10 @@ vi.mock('./api', () => ({
   connectAccount: vi.fn(),
   connectDemo: vi.fn(),
   sendEmail: vi.fn(),
+  listDrafts: vi.fn(),
+  getDraft: vi.fn(),
+  saveDraft: vi.fn(),
+  deleteDraft: vi.fn(),
   moveEmail: vi.fn(),
   restoreEmail: vi.fn(),
   searchContacts: vi.fn(),
@@ -65,6 +69,10 @@ describe('inbox page', () => {
     desktop.enabled = false;
     api.getSession.mockResolvedValue({ logged_in: true, user: USER });
     api.listAccounts.mockResolvedValue([WORK]);
+    api.listDrafts.mockResolvedValue([]);
+    api.saveDraft.mockResolvedValue({});
+    api.listDrafts.mockResolvedValue([]);
+    api.saveDraft.mockResolvedValue({});
     api.getRemembered.mockResolvedValue([]);
     api.setWatermark.mockResolvedValue({ ok: true });
     api.getEmails.mockImplementation(async (accountId) => (
@@ -147,6 +155,8 @@ describe('inbox page', () => {
     expect(api.getEmails).not.toHaveBeenCalled();
 
     api.listAccounts.mockResolvedValue([WORK]);
+    api.listDrafts.mockResolvedValue([]);
+    api.saveDraft.mockResolvedValue({});
     fireEvent.change(screen.getByLabelText(/^Password/), { target: { value: 'pw' } });
     fireEvent.click(screen.getByRole('button', { name: 'Connect Email Account' }));
 
@@ -304,6 +314,37 @@ describe('inbox page', () => {
     });
   });
 
+  describe('drafts', () => {
+    const DRAFT = { id: '66666666-6666-4666-8666-666666666666', subject: 'Plans', to: [{ name: 'Sarah', email: 's@x.example' }], updated_at: 1 };
+
+    it('lists drafts in the sidebar and reopens one as it was', async () => {
+      api.listDrafts.mockResolvedValue([DRAFT]);
+      api.getDraft.mockResolvedValue({ id: DRAFT.id, content: { title: 'Reply', subject: 'Plans', body: 'Where I left off', to: DRAFT.to }, updated_at: 1 });
+      renderInbox();
+      const drafts = await screen.findByRole('button', { name: /Drafts/ });
+      expect(drafts).toHaveAttribute('aria-expanded', 'true');
+      fireEvent.click(screen.getByRole('button', { name: 'Sarah: Plans' }));
+
+      const dialog = await screen.findByRole('dialog', { name: 'Reply' });
+      expect(api.getDraft).toHaveBeenCalledWith('work', DRAFT.id);
+      expect(within(dialog).getByLabelText('Message')).toHaveValue('Where I left off');
+    });
+
+    it('closing a written message keeps it as a draft and says so', async () => {
+      renderInbox();
+      await screen.findByText('Thirty');
+      fireEvent.click(screen.getByRole('button', { name: /Compose/ }));
+      const dialog = screen.getByRole('dialog', { name: 'New message' });
+      fireEvent.change(within(dialog).getByLabelText('Message'), { target: { value: 'Later' } });
+      api.listDrafts.mockResolvedValue([{ ...DRAFT, subject: '', to: [] }]);
+      fireEvent.keyDown(dialog, { key: 'Escape' });
+
+      expect(await screen.findByRole('status')).toHaveTextContent('Draft saved.');
+      expect(api.saveDraft).toHaveBeenCalledWith('work', expect.stringMatching(/^[0-9a-f-]{36}$/), expect.objectContaining({ body: 'Later' }));
+      expect(await screen.findByRole('button', { name: 'No recipients: (no subject)' })).toBeInTheDocument();
+    });
+  });
+
   describe('compose', () => {
     async function composeTo(address) {
       renderInbox();
@@ -366,6 +407,10 @@ describe('desktop app', () => {
     desktop.enabled = true;
     api.getSession.mockResolvedValue({ logged_in: true, user: null, app: { can_save_passwords: true } });
     api.listAccounts.mockResolvedValue([WORK]);
+    api.listDrafts.mockResolvedValue([]);
+    api.saveDraft.mockResolvedValue({});
+    api.listDrafts.mockResolvedValue([]);
+    api.saveDraft.mockResolvedValue({});
     api.getRemembered.mockResolvedValue([]);
     api.getEmails.mockResolvedValue(inbox([{ uid: 30, subject: 'Thirty', from: 'B', date: now }]));
     api.getEmail.mockResolvedValue({

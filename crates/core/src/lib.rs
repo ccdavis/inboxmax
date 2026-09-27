@@ -8,6 +8,7 @@ pub mod attachment;
 pub mod config;
 pub mod contacts;
 pub mod db;
+pub mod drafts;
 pub mod error;
 pub mod fake_mail;
 pub mod imap_client;

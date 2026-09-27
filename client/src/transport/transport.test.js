@@ -27,6 +27,8 @@ describe('http transport', () => {
     await http.deleteContact(7);
     await http.moveEmail('a1', 12, 'trash');
     await http.restoreEmail('a1', 'trash', 'id@x');
+    await http.saveDraft('a1', 'd1', { body: 'x' });
+    await http.deleteDraft('a1', 'd1');
 
     const calls = fetch.mock.calls.map(([url, init]) => [init.method ?? 'GET', url]);
     expect(calls).toEqual([
@@ -41,6 +43,8 @@ describe('http transport', () => {
       ['DELETE', '/api/contacts/7'],
       ['POST', '/api/accounts/a1/emails/12/move'],
       ['POST', '/api/accounts/a1/restore'],
+      ['PUT', '/api/accounts/a1/drafts/d1'],
+      ['DELETE', '/api/accounts/a1/drafts/d1'],
     ]);
   });
 
@@ -70,6 +74,9 @@ describe('tauri transport', () => {
     await tauri.showInFolder('C:\\Downloads\\x.pdf');
     await tauri.moveEmail('a1', 12, 'trash');
     await tauri.restoreEmail('a1', 'trash', 'id@x');
+    await tauri.listDrafts('a1');
+    await tauri.saveDraft('a1', 'd1', { body: 'x' });
+    await tauri.deleteDraft('a1', 'd1');
 
     expect(invoke.mock.calls).toEqual([
       ['list_emails', { accountId: 'a1', since: null }],
@@ -85,6 +92,9 @@ describe('tauri transport', () => {
       ['show_in_folder', { path: 'C:\\Downloads\\x.pdf' }],
       ['move_email', { accountId: 'a1', uid: 12, to: 'trash' }],
       ['restore_email', { accountId: 'a1', from: 'trash', messageId: 'id@x' }],
+      ['list_drafts', { accountId: 'a1' }],
+      ['save_draft', { accountId: 'a1', draftId: 'd1', content: { body: 'x' } }],
+      ['delete_draft', { accountId: 'a1', draftId: 'd1' }],
     ]);
   });
 

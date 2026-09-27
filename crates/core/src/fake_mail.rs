@@ -292,6 +292,7 @@ fn addresses(mailboxes: &[Mailbox]) -> Vec<MailAddress> {
 /// seen, and a couple remembered. Everything the inbox does is then on show.
 pub async fn reset_demo(db: &SqlitePool, account_id: &str) -> AppResult<()> {
     forget_moves(DEMO_EMAIL);
+    crate::drafts::delete_all(db, account_id).await?;
     let envelopes = envelopes(&MailCredentials {
         host: DEMO_HOST.into(),
         port: 993,
@@ -842,6 +843,59 @@ mod tests {
                 Some("Sarah Chen".to_string())
             )],
             "Sarah once (as sender and as Reply-To); the calendar and GitHub robots are skipped"
+        );
+    }
+
+    #[tokio::test]
+    async fn sending_removes_the_messages_draft_but_a_failed_send_keeps_it() {
+        let db = db().await;
+        sqlx::query(
+            "INSERT INTO accounts (id, email, imap_host, smtp_host, user_id)
+             VALUES ('a', 'drafter@example.com', 'imap.example.com', 'smtp.example.com', 'u')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let account = connected("drafter@example.com");
+        let draft = "33333333-3333-4333-8333-333333333333";
+        crate::drafts::save(&db, "a", draft, &serde_json::json!({ "subject": "Hi" }))
+            .await
+            .unwrap();
+        let request = |to: &str| crate::outgoing::SendRequest {
+            to: vec![MailAddress::new(None, to)],
+            draft_id: Some(draft.into()),
+            ..Default::default()
+        };
+
+        assert!(
+            mailbox::send(
+                &db,
+                &FakeMailFetcher,
+                "u",
+                &account,
+                request(REFUSED_RECIPIENT)
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            crate::drafts::list(&db, "a").await.unwrap().len(),
+            1,
+            "kept"
+        );
+
+        mailbox::send(
+            &db,
+            &FakeMailFetcher,
+            "u",
+            &account,
+            request("ok@example.com"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            crate::drafts::list(&db, "a").await.unwrap().is_empty(),
+            "removed"
         );
     }
 

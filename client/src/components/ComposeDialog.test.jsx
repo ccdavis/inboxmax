@@ -87,6 +87,7 @@ describe('ComposeDialog', () => {
       references: [],
       attachments: [],
       forward: null,
+      draft_id: null,
     };
     expect(onSend).toHaveBeenCalledWith(request);
     expect(onSent).toHaveBeenCalledWith({ message_id: 'id@x', saved_to_sent: true }, request);
@@ -164,7 +165,7 @@ describe('ComposeDialog', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it('asks before discarding a draft', () => {
+  it('without drafts, asks before discarding a written message', async () => {
     const { onClose } = renderCompose();
     type(screen.getByLabelText('Message'), 'Half a thought');
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
@@ -175,7 +176,7 @@ describe('ComposeDialog', () => {
 
     fireEvent.keyDown(dialog(), { key: 'Escape' });
     fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
-    expect(onClose).toHaveBeenCalled();
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith({ draftSaved: false }));
   });
 
   describe('attachments', () => {

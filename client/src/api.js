@@ -28,6 +28,13 @@ export const getEmails = (accountId, since) => transport.getEmails(accountId, si
 export const getEmail = (accountId, uid) => transport.getEmail(accountId, uid);
 export const searchEmails = (accountId, query) => transport.searchEmails(accountId, query);
 export const setWatermark = (accountId, uid) => transport.setWatermark(accountId, uid);
+// Drafts of a mailbox: listed as { id, subject, to, updated_at }; `content`
+// is the compose form's state.
+export const listDrafts = (accountId) => transport.listDrafts(accountId);
+export const getDraft = (accountId, draftId) => transport.getDraft(accountId, draftId);
+export const saveDraft = (accountId, draftId, content) => transport.saveDraft(accountId, draftId, content);
+export const deleteDraft = (accountId, draftId) => transport.deleteDraft(accountId, draftId);
+
 /** Move a message out of the inbox: `to` is 'trash' or 'archive'. */
 export const moveEmail = (accountId, uid, to) => transport.moveEmail(accountId, uid, to);
 /** Undo a move, finding the message by its Message-ID. Resolves to { uid } in the inbox. */

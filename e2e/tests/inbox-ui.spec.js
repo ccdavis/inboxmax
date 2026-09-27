@@ -48,6 +48,7 @@ async function mockApi(page, { searchResults = [] } = {}) {
     }
     if (path === '/api/accounts/acct/search') return json(searchResults);
     if (path === '/api/accounts/acct/remembered') return json([]);
+    if (path === '/api/accounts/acct/drafts') return json([]);
     return json({ ok: true });
   });
 }

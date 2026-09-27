@@ -36,6 +36,10 @@ export const transport = {
   searchEmails: (accountId, query) => call('search_emails', { accountId, query }),
   setWatermark: (accountId, uid) => call('set_watermark', { accountId, uid }),
   sendEmail: (accountId, request) => call('send_email', { accountId, request }),
+  listDrafts: (accountId) => call('list_drafts', { accountId }),
+  getDraft: (accountId, draftId) => call('get_draft', { accountId, draftId }),
+  saveDraft: (accountId, draftId, content) => call('save_draft', { accountId, draftId, content }),
+  deleteDraft: (accountId, draftId) => call('delete_draft', { accountId, draftId }),
   moveEmail: (accountId, uid, to) => call('move_email', { accountId, uid, to }),
   restoreEmail: (accountId, from, messageId) => call('restore_email', { accountId, from, messageId }),
 

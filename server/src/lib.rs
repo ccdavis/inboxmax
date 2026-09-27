@@ -30,7 +30,7 @@ const SEND_BODY_LIMIT: usize =
 pub fn api_router(state: AppState) -> axum::Router {
     use axum::extract::DefaultBodyLimit;
     use axum::routing::{get, post, put};
-    use handlers::{accounts, auth, contacts, emails, remembered};
+    use handlers::{accounts, auth, contacts, drafts, emails, remembered};
 
     let router = axum::Router::new()
         .route("/api/register", post(auth::register))
@@ -77,6 +77,19 @@ pub fn api_router(state: AppState) -> axum::Router {
         .route(
             "/api/accounts/{account_id}/restore",
             post(emails::restore_email),
+        )
+        .route(
+            "/api/accounts/{account_id}/drafts",
+            get(drafts::list_drafts),
+        )
+        .route(
+            "/api/accounts/{account_id}/drafts/{draft_id}",
+            get(drafts::get_draft)
+                .put(drafts::save_draft)
+                .delete(drafts::delete_draft)
+                .layer(DefaultBodyLimit::max(
+                    inboxmax_core::drafts::MAX_DRAFT_BYTES + 1024,
+                )),
         )
         .route(
             "/api/accounts/{account_id}/send",

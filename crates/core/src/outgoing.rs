@@ -61,6 +61,9 @@ pub struct SendRequest {
     /// The original's attachments, when forwarding.
     #[serde(default)]
     pub forward: Option<ForwardedAttachments>,
+    /// The draft this was written in, removed once the message is sent.
+    #[serde(default)]
+    pub draft_id: Option<String>,
 }
 
 /// The outcome of a send.

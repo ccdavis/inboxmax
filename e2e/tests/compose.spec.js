@@ -101,15 +101,16 @@ test('catches missing and unreadable recipients and a missing subject', async ({
   expect(sent.subject).toBe('');
 });
 
-test('discarding a draft asks first, and closing an empty one does not', async ({ page }) => {
+test('an empty message just closes; Discard asks before throwing a written one away', async ({ page }) => {
   await signUpWithMailbox(page);
   let dialog = await openCompose(page);
   await page.keyboard.press('Escape');
   await expect(dialog).toBeHidden();
+  await expect(page.getByRole('status')).toHaveCount(0);
 
   dialog = await openCompose(page);
   await dialog.getByLabel('Message').fill('Unfinished');
-  await page.keyboard.press('Escape');
+  await dialog.getByRole('button', { name: 'Discard' }).click();
   const question = dialog.getByRole('group', { name: 'Discard this message?' });
   await question.getByRole('button', { name: 'Keep editing' }).click();
   await expect(dialog.getByLabel('Message')).toHaveValue('Unfinished');
@@ -118,11 +119,13 @@ test('discarding a draft asks first, and closing an empty one does not', async (
   const composeButton = page.getByRole('button', { name: /Compose/ });
   expect(await composeButton.evaluate((button) => button.closest('[inert]') !== null)).toBe(true);
 
-  await dialog.getByRole('button', { name: 'Close' }).click();
+  await dialog.getByRole('button', { name: 'Discard' }).click();
   await dialog.getByRole('group', { name: 'Discard this message?' }).getByRole('button', { name: 'Discard' }).click();
   await expect(dialog).toBeHidden();
   await expect(page.getByRole('button', { name: /Compose/ })).toBeVisible();
+  // Nothing sent, and no draft left behind.
   expect(await outbox(page)).toEqual([]);
+  await expect(page.getByRole('complementary').getByRole('button', { name: /^Drafts/ })).toHaveCount(0);
 });
 
 test.describe('on a phone', () => {

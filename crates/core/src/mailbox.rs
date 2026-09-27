@@ -4,10 +4,10 @@
 
 use crate::account::ConnectedAccount;
 use crate::attachment::Attachment;
-use crate::contacts;
 use crate::error::{AppError, AppResult};
 use crate::imap_client::{EmailEnvelope, Folder, FullEmail, MailAddress, MailFetcher};
 use crate::outgoing::{OutgoingEmail, SendReceipt, SendRequest};
+use crate::{contacts, drafts};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -263,6 +263,7 @@ pub async fn send(
     request: SendRequest,
 ) -> AppResult<SendReceipt> {
     let forward = request.forward.clone();
+    let draft_id = request.draft_id.clone();
     let mut email = OutgoingEmail::new(MailAddress::new(None, &account.email), request)?;
     // A forward's attachments come straight from the original message.
     if let Some(forward) = forward {
@@ -283,6 +284,11 @@ pub async fn send(
     // Sent is sent: a failed address-book update must not look like a failed send.
     if let Err(e) = contacts::record_sent(db, user_id, &recipients).await {
         tracing::warn!("Could not update the address book: {e}");
+    }
+    if let Some(draft_id) = draft_id
+        && let Err(e) = drafts::delete(db, &account.id, &draft_id).await
+    {
+        tracing::warn!("Could not remove the sent message's draft: {e}");
     }
     Ok(receipt)
 }

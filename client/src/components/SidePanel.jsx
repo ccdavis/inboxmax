@@ -1,17 +1,20 @@
 import SearchBox from './SearchBox';
 import AccountList from './AccountList';
 import RememberedList from './RememberedList';
+import DraftsList from './DraftsList';
 import DayGroup from './DayGroup';
 import { groupByDay } from '../utils/dates';
 
 /**
- * Sidebar content: search, the user's mailboxes, the address book, remembered
- * emails, and the inbox browsable by day. `accounts` is optional so the panel also works
+ * Sidebar content: search, the user's mailboxes, the address book, drafts,
+ * remembered emails, and the inbox browsable by day. `accounts` is optional so the panel also works
  * without mailbox switching.
  */
 export default function SidePanel({
   accounts,
   onOpenAddressBook,
+  drafts = [],
+  onOpenDraft,
   emails,
   remembered,
   selectedUid,
@@ -42,6 +45,8 @@ export default function SidePanel({
             </button>
           </div>
         )}
+
+        {onOpenDraft && <DraftsList drafts={drafts} onOpen={onOpenDraft} />}
 
         <RememberedList
           remembered={remembered}

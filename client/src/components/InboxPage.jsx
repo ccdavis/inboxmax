@@ -11,7 +11,9 @@ import Spinner from './Spinner';
 import { useAccounts } from '../hooks/useAccounts';
 import { useEmails } from '../hooks/useEmails';
 import { useRemembered } from '../hooks/useRemembered';
+import { useDrafts } from '../hooks/useDrafts';
 import { forwardDraft, replyDraft } from '../utils/replies';
+import { newId } from '../utils/ids';
 
 const POLL_INTERVAL_MS = 2 * 60 * 1000;
 
@@ -49,6 +51,7 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
     remembered, remember, forget, isRemembered, fetchRemembered,
     error: rememberedError,
   } = useRemembered(accountId);
+  const { drafts, refresh: refreshDrafts } = useDrafts(accountId);
   const searchMode = searchQuery != null;
 
   // Load the inbox whenever a mailbox becomes readable.
@@ -148,17 +151,31 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
   const handleReply = (kind, email) => {
     setStatus(null);
     if (kind === 'forward') {
-      setCompose({ title: 'Forward', initial: forwardDraft(email) });
+      setCompose({ title: 'Forward', initial: forwardDraft(email), draftId: newId() });
     } else {
       setCompose({
         title: kind === 'all' ? 'Reply all' : 'Reply',
         initial: replyDraft(email, { me: active.email, all: kind === 'all' }),
+        draftId: newId(),
       });
+    }
+  };
+
+  /** Reopen a saved draft where it was left. */
+  const handleOpenDraft = async (draft) => {
+    setStatus(null);
+    try {
+      const { content } = await api.getDraft(active.id, draft.id);
+      setCompose({ title: content.title || 'Draft', initial: content, draftId: draft.id, fromDraft: true });
+    } catch (caught) {
+      setNotice(`Could not open the draft: ${caught.message}`);
+      refreshDrafts();
     }
   };
 
   const handleSent = (receipt, request) => {
     setCompose(null);
+    refreshDrafts();
     const recipients = [...request.to, ...request.cc, ...request.bcc];
     const first = recipients[0].name || recipients[0].email;
     const who = recipients.length > 1 ? `${first} and ${recipients.length - 1} more` : first;
@@ -303,7 +320,7 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
       type="button"
       onClick={() => {
         setStatus(null);
-        setCompose({ title: 'New message', initial: {} });
+        setCompose({ title: 'New message', initial: {}, draftId: newId() });
       }}
       className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-500 px-3 py-1.5 text-sm font-medium text-white hover:from-indigo-600 hover:to-violet-600 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
     >
@@ -333,6 +350,8 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
             onRemove: handleRemove,
           }}
           onOpenAddressBook={() => setAddressBookOpen(true)}
+          drafts={drafts}
+          onOpenDraft={handleOpenDraft}
           emails={emails}
           remembered={remembered}
           selectedUid={selectedUid}
@@ -376,12 +395,26 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
     </Layout>
     {compose && (
       <ComposeDialog
+        key={compose.draftId}
         from={active.email}
         title={compose.title}
         initial={compose.initial}
+        draftId={compose.draftId}
+        fromDraft={compose.fromDraft}
+        onSaveDraft={async (content) => {
+          await api.saveDraft(active.id, compose.draftId, content);
+          refreshDrafts();
+        }}
+        onDeleteDraft={async () => {
+          await api.deleteDraft(active.id, compose.draftId);
+          refreshDrafts();
+        }}
         onSend={(request) => api.sendEmail(active.id, request)}
         onSent={handleSent}
-        onClose={() => setCompose(null)}
+        onClose={({ draftSaved } = {}) => {
+          setCompose(null);
+          if (draftSaved) setStatus({ text: 'Draft saved.' });
+        }}
         suggestContacts={api.searchContacts}
       />
     )}
