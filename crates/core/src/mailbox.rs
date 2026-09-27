@@ -6,7 +6,7 @@ use crate::account::ConnectedAccount;
 use crate::attachment::Attachment;
 use crate::contacts;
 use crate::error::{AppError, AppResult};
-use crate::imap_client::{EmailEnvelope, FullEmail, MailAddress, MailFetcher};
+use crate::imap_client::{EmailEnvelope, Folder, FullEmail, MailAddress, MailFetcher};
 use crate::outgoing::{OutgoingEmail, SendReceipt, SendRequest};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -181,6 +181,52 @@ pub async fn get_email(
         tracing::warn!("Could not update the address book: {e}");
     }
     Ok(email)
+}
+
+/// Where a restored message now is.
+#[derive(Debug, Serialize)]
+pub struct Restored {
+    pub uid: u32,
+}
+
+/// Move a message out of the inbox, into Trash or the archive. Its
+/// remembered entry goes too, since its UID no longer names it.
+pub async fn move_email(
+    db: &SqlitePool,
+    mail: &dyn MailFetcher,
+    account: &ConnectedAccount,
+    uid: i64,
+    to: Folder,
+) -> AppResult<()> {
+    let checked = validate_uid(uid)?;
+    mail.move_message(&account.mail_credentials(), checked, to)
+        .await?;
+    if let Err(e) = forget(db, &account.id, uid).await {
+        tracing::warn!("Could not forget a moved message: {e}");
+    }
+    Ok(())
+}
+
+/// Undo a move: bring the message with this Message-ID back to the inbox.
+pub async fn restore_email(
+    mail: &dyn MailFetcher,
+    account: &ConnectedAccount,
+    from: Folder,
+    message_id: &str,
+) -> AppResult<Restored> {
+    let message_id = message_id
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>');
+    if message_id.is_empty() {
+        return Err(AppError::BadRequest(
+            "This message cannot be found again to restore it".into(),
+        ));
+    }
+    let uid = mail
+        .restore_message(&account.mail_credentials(), from, message_id)
+        .await?;
+    Ok(Restored { uid })
 }
 
 /// One attachment of a message, by its position among the attachments.

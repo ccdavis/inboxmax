@@ -32,6 +32,7 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
   const [searchQuery, setSearchQuery] = useState(null);
   const [hideSeen, setHideSeen] = useState(false);
   const [notice, setNotice] = useState(null);
+  // Good news across the top: { text, action: { label, onClick } | null }.
   const [status, setStatus] = useState(null);
   // The open compose dialog: { title, initial }, or null.
   const [compose, setCompose] = useState(null);
@@ -41,7 +42,7 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
   const accountId = active?.connected ? active.id : null;
   const {
     emails, loading, refreshing, error, lastOpen, watermarkUid,
-    fetchEmails, reload, setWatermarkManually, markAllSeen, markAllSeenNow,
+    fetchEmails, reload, removeEmail, setWatermarkManually, markAllSeen, markAllSeenNow,
     searchResults, searchLoading, searchError, search, clearSearch, clearStoredCursors,
   } = useEmails(accountId);
   const {
@@ -163,11 +164,58 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
     const who = recipients.length > 1 ? `${first} and ${recipients.length - 1} more` : first;
     if (receipt.saved_to_sent) {
       setNotice(null);
-      setStatus(`Message sent to ${who}.`);
+      setStatus({ text: `Message sent to ${who}.` });
     } else {
       setStatus(null);
       setNotice(`Message sent to ${who}, but no copy could be saved in your Sent folder.`);
     }
+  };
+
+  const MOVED = { trash: 'Moved to Trash.', archive: 'Archived.' };
+  const VERB = { trash: 'delete', archive: 'archive' };
+
+  const handleUndo = async (accountKey, email, from, wasRemembered) => {
+    setStatus(null);
+    try {
+      const { uid } = await api.restoreEmail(accountKey, from, email.message_id);
+      // The message is back under a new UID; so is its star. A list row's
+      // sender is text, the reader's a list of addresses.
+      if (wasRemembered) {
+        const sender = typeof email.from === 'string'
+          ? email.from
+          : email.from?.map((a) => a.name || a.email).join(', ');
+        await remember({ uid, subject: email.subject, from: sender, date: email.date });
+      }
+      setStatus({ text: 'Moved back to the inbox.' });
+    } catch (caught) {
+      setNotice(`Could not undo: ${caught.message}`);
+    }
+    fetchEmails();
+    fetchRemembered();
+  };
+
+  /** Archive or delete a message, from the list or the reader, with Undo. */
+  const handleMove = async (email, to) => {
+    const accountKey = active.id;
+    const wasRemembered = isRemembered(email.uid);
+    setNotice(null);
+    try {
+      await api.moveEmail(accountKey, email.uid, to);
+    } catch (caught) {
+      setNotice(`Could not ${VERB[to]} “${email.subject || '(no subject)'}”: ${caught.message}`);
+      return;
+    }
+    removeEmail(email.uid);
+    if (selectedUid === email.uid) setSelectedUid(null);
+    // A moved message is no longer remembered.
+    if (wasRemembered) fetchRemembered();
+    setStatus({
+      text: MOVED[to],
+      // Undo finds the message by its Message-ID; without one it cannot.
+      action: email.message_id
+        ? { label: 'Undo', onClick: () => handleUndo(accountKey, email, to, wasRemembered) }
+        : null,
+    });
   };
 
   const handleRemove = async (id) => {
@@ -270,7 +318,8 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
       homeLink={!api.isDesktop}
       notice={notice}
       onDismissNotice={() => setNotice(null)}
-      status={status}
+      status={status?.text}
+      statusAction={status?.action}
       onDismissStatus={() => setStatus(null)}
       actions={composeButton}
       inert={compose != null || addressBookOpen}
@@ -302,6 +351,7 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
           onBack={() => setSelectedUid(null)}
           me={active.email}
           onReply={handleReply}
+          onMove={handleMove}
         />
       ) : (
         <EmailList
@@ -317,6 +367,7 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
           watermarkUid={watermarkUid}
           onSetWatermark={setWatermarkManually}
           onMarkAllSeen={markAllSeenNow}
+          onMove={handleMove}
           hideSeen={hideSeen}
           onToggleHideSeen={() => setHideSeen((h) => !h)}
           onRefresh={fetchEmails}

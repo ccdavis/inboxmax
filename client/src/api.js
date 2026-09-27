@@ -28,6 +28,10 @@ export const getEmails = (accountId, since) => transport.getEmails(accountId, si
 export const getEmail = (accountId, uid) => transport.getEmail(accountId, uid);
 export const searchEmails = (accountId, query) => transport.searchEmails(accountId, query);
 export const setWatermark = (accountId, uid) => transport.setWatermark(accountId, uid);
+/** Move a message out of the inbox: `to` is 'trash' or 'archive'. */
+export const moveEmail = (accountId, uid, to) => transport.moveEmail(accountId, uid, to);
+/** Undo a move, finding the message by its Message-ID. Resolves to { uid } in the inbox. */
+export const restoreEmail = (accountId, from, messageId) => transport.restoreEmail(accountId, from, messageId);
 /**
  * `request`: { to, cc, bcc: [{ name, email }], subject, body, in_reply_to, references }.
  * Resolves to { message_id, saved_to_sent }.

@@ -71,6 +71,14 @@ pub fn api_router(state: AppState) -> axum::Router {
             get(emails::download_attachment),
         )
         .route(
+            "/api/accounts/{account_id}/emails/{uid}/move",
+            post(emails::move_email),
+        )
+        .route(
+            "/api/accounts/{account_id}/restore",
+            post(emails::restore_email),
+        )
+        .route(
             "/api/accounts/{account_id}/send",
             post(emails::send_email).layer(DefaultBodyLimit::max(SEND_BODY_LIMIT)),
         )

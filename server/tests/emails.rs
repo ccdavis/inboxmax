@@ -132,12 +132,14 @@ fn sample_envelopes() -> Vec<EmailEnvelope> {
             subject: "Hello".into(),
             from: "alice@example.com".into(),
             date: Some(Utc::now()),
+            message_id: None,
         },
         EmailEnvelope {
             uid: 99,
             subject: "Older".into(),
             from: "bob@example.com".into(),
             date: Some(Utc::now() - chrono::Duration::hours(2)),
+            message_id: None,
         },
     ]
 }
@@ -398,12 +400,14 @@ async fn list_emails_filters_imap_day_results_to_the_exact_timestamp() {
             subject: "New".into(),
             from: "new@example.com".into(),
             date: Some(now),
+            message_id: None,
         },
         EmailEnvelope {
             uid: 1,
             subject: "Before cursor".into(),
             from: "old@example.com".into(),
             date: Some(now - chrono::Duration::hours(2)),
+            message_id: None,
         },
     ])
     .await;
@@ -873,6 +877,50 @@ async fn sends_attachments_larger_than_the_default_request_limit() {
     assert_eq!(response.status(), StatusCode::OK);
     let sent = mail.sent.lock().unwrap();
     assert_eq!(sent[0].1.attachments[0].data.len(), 3 * 1024 * 1024);
+}
+
+#[tokio::test]
+async fn moving_needs_a_mail_client_that_can_and_a_known_folder() {
+    let state = build_state(sample_envelopes()).await;
+    let post = |uri: String, body: Value| {
+        Request::builder()
+            .uri(uri)
+            .method("POST")
+            .header("Content-Type", "application/json")
+            .header("Cookie", format!("inboxmax_session={SESSION_TOKEN}"))
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    // The mock mail client only reads, so it refuses to move.
+    let refused = build_app(state.clone())
+        .oneshot(post(
+            format!("/api/accounts/{ACCOUNT_ID}/emails/100/move"),
+            serde_json::json!({ "to": "trash" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        parse_response(refused).await["error"],
+        "Moving mail is not available"
+    );
+    // Only Trash and the archive are destinations.
+    let unknown = build_app(state.clone())
+        .oneshot(post(
+            format!("/api/accounts/{ACCOUNT_ID}/emails/100/move"),
+            serde_json::json!({ "to": "spam" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let no_id = build_app(state)
+        .oneshot(post(
+            format!("/api/accounts/{ACCOUNT_ID}/restore"),
+            serde_json::json!({ "from": "trash", "message_id": "  " }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(no_id.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

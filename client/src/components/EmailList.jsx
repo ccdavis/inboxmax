@@ -52,6 +52,7 @@ export default function EmailList({
   watermarkUid,
   onSetWatermark,
   onMarkAllSeen,
+  onMove,
   hideSeen,
   onToggleHideSeen,
   onRefresh,
@@ -99,6 +100,7 @@ export default function EmailList({
       isSeen={!isUnseen(email)}
       isWatermark={email.uid === watermarkUid}
       onSetWatermark={onSetWatermark}
+      onMove={onMove}
     />
   );
 

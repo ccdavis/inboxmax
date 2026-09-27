@@ -7,8 +7,8 @@ use crate::state::{DesktopState, LOCAL_USER_ID};
 use inboxmax_core::account::{self, AccountStatus, ConnectRequest, ConnectResponse};
 use inboxmax_core::contacts::{self, Contact, ContactRequest};
 use inboxmax_core::fake_mail::{self, DEMO_EMAIL, DEMO_HOST, DEMO_PASSWORD};
-use inboxmax_core::imap_client::{EmailEnvelope, FullEmail};
-use inboxmax_core::mailbox::{self, EmailListResponse, RememberRequest, RememberedEmail};
+use inboxmax_core::imap_client::{EmailEnvelope, Folder, FullEmail};
+use inboxmax_core::mailbox::{self, EmailListResponse, RememberRequest, RememberedEmail, Restored};
 use inboxmax_core::outgoing::{SendReceipt, SendRequest};
 use inboxmax_core::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
@@ -156,6 +156,30 @@ pub async fn send_email(
     .await
 }
 
+/// Move a message to Trash or the archive.
+#[tauri::command]
+pub async fn move_email(
+    state: State<'_, DesktopState>,
+    account_id: String,
+    uid: i64,
+    to: Folder,
+) -> AppResult<()> {
+    let account = state.require_account(&account_id).await?;
+    mailbox::move_email(&state.db, state.mail.as_ref(), &account, uid, to).await
+}
+
+/// Undo a move.
+#[tauri::command]
+pub async fn restore_email(
+    state: State<'_, DesktopState>,
+    account_id: String,
+    from: Folder,
+    message_id: String,
+) -> AppResult<Restored> {
+    let account = state.require_account(&account_id).await?;
+    mailbox::restore_email(state.mail.as_ref(), &account, from, &message_id).await
+}
+
 #[derive(Serialize)]
 pub struct SavedFile {
     pub path: String,
@@ -163,7 +187,11 @@ pub struct SavedFile {
     pub filename: String,
 }
 
+/// The Downloads folder, or INBOXMAX_DOWNLOAD_DIR (for tests).
 fn download_dir(app: &tauri::AppHandle) -> AppResult<std::path::PathBuf> {
+    if let Some(dir) = std::env::var_os("INBOXMAX_DOWNLOAD_DIR") {
+        return Ok(dir.into());
+    }
     app.path()
         .download_dir()
         .map_err(|e| AppError::Internal(anyhow::anyhow!("There is no Downloads folder: {e}")))

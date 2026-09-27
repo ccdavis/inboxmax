@@ -20,10 +20,18 @@ function useIsMobile() {
  * A message across the top of the page. The live-region role is on the text
  * alone, so assistive technology announces the message, not the ✕.
  */
-function Banner({ role, onDismiss, className, children }) {
+function Banner({ role, onDismiss, action, className, children }) {
   return (
     <div className={`flex items-start justify-between gap-3 text-sm px-4 py-2 border-b ${className}`}>
       <span role={role}>{children}</span>
+      {action && (
+        <button
+          onClick={action.onClick}
+          className="ml-auto shrink-0 rounded px-2 font-medium text-accent hover:text-accent-hover underline-offset-2 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+        >
+          {action.label}
+        </button>
+      )}
       {onDismiss && (
         <button
           onClick={onDismiss}
@@ -44,7 +52,7 @@ function Banner({ role, onDismiss, className, children }) {
  * passes no `onLogout` and `homeLink={false}`: it has no sign-in or landing page.
  *
  * `notice` is a problem to report; `status` is good news (such as a sent
- * message). `actions` sit in the header; `inert` shuts the page off while a
+ * message), optionally with a `statusAction` ({ label, onClick }) like Undo. `actions` sit in the header; `inert` shuts the page off while a
  * dialog is open over it.
  */
 export default function Layout({
@@ -54,6 +62,7 @@ export default function Layout({
   notice,
   onDismissNotice,
   status,
+  statusAction,
   onDismissStatus,
   actions,
   inert = false,
@@ -145,7 +154,7 @@ export default function Layout({
         </Banner>
       )}
       {status && (
-        <Banner role="status" onDismiss={onDismissStatus} className="bg-accent-soft text-ink border-line">
+        <Banner role="status" onDismiss={onDismissStatus} action={statusAction} className="bg-accent-soft text-ink border-line">
           {status}
         </Banner>
       )}

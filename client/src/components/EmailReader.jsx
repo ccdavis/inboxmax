@@ -6,6 +6,7 @@ import { formatFullDate } from '../utils/dates';
 import { sameMailboxes } from '../utils/addresses';
 import { hasOtherRecipients } from '../utils/replies';
 import { formatSize } from '../utils/files';
+import { ArchiveIcon, TrashIcon } from './icons';
 
 function sanitizeEmailHtml(html) {
   // No img, style or class attributes: remote images and CSS backgrounds are
@@ -203,8 +204,9 @@ function BackButton({ onBack, children }) {
  * One message. `onReply(kind, email)` with kind 'reply', 'all', or 'forward'
  * offers the reply actions; `me` is the mailbox's own address, so Reply all
  * appears only when it would reach someone besides the sender.
+ * `onMove(email, 'archive' | 'trash')` offers Archive and Delete.
  */
-export default function EmailReader({ accountId, emailUid, onBack, me, onReply }) {
+export default function EmailReader({ accountId, emailUid, onBack, me, onReply, onMove }) {
   const [request, setRequest] = useState({ uid: null, email: null, error: null });
   const headingRef = useRef(null);
 
@@ -286,6 +288,12 @@ export default function EmailReader({ accountId, emailUid, onBack, me, onReply }
               <ActionButton icon="↩↩" onClick={() => onReply('all', email)}>Reply all</ActionButton>
             )}
             <ActionButton icon="↪" onClick={() => onReply('forward', email)}>Forward</ActionButton>
+            {onMove && (
+              <>
+                <ActionButton icon={<ArchiveIcon />} onClick={() => onMove(email, 'archive')}>Archive</ActionButton>
+                <ActionButton icon={<TrashIcon />} onClick={() => onMove(email, 'trash')}>Delete</ActionButton>
+              </>
+            )}
           </div>
         )}
       </header>

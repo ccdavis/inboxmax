@@ -147,6 +147,13 @@ export function useEmails(accountKey) {
     return markAllSeen();
   }, [markAllSeen]);
 
+  /** Take a message that was moved out of the inbox off the list and results. */
+  const removeEmail = useCallback((uid) => {
+    emailsRef.current = emailsRef.current.filter((email) => email.uid !== uid);
+    setEmails(emailsRef.current);
+    setSearchResults((results) => results.filter((email) => email.uid !== uid));
+  }, []);
+
   /** Reload after the mailbox's state was reset elsewhere (the demo starting over). */
   const reload = useCallback(() => {
     manualWatermarkRef.current = false;
@@ -195,6 +202,7 @@ export function useEmails(accountKey) {
     watermarkUid,
     fetchEmails,
     reload,
+    removeEmail,
     setWatermarkManually,
     markAllSeen,
     markAllSeenNow,

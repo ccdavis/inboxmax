@@ -65,6 +65,29 @@ pub trait MailFetcher: Send + Sync {
 
     async fn fetch_email(&self, credentials: &MailCredentials, uid: u32) -> AppResult<FullEmail>;
 
+    /// Move a message out of the inbox, into Trash or the archive.
+    async fn move_message(
+        &self,
+        credentials: &MailCredentials,
+        uid: u32,
+        to: Folder,
+    ) -> AppResult<()> {
+        let _ = (credentials, uid, to);
+        Err(AppError::BadRequest("Moving mail is not available".into()))
+    }
+
+    /// Move a message back to the inbox from Trash or the archive, found by
+    /// its Message-ID (moving gives it a new UID). Returns its inbox UID.
+    async fn restore_message(
+        &self,
+        credentials: &MailCredentials,
+        from: Folder,
+        message_id: &str,
+    ) -> AppResult<u32> {
+        let _ = (credentials, from, message_id);
+        Err(AppError::BadRequest("Moving mail is not available".into()))
+    }
+
     /// One attachment of a message, by its position among the attachments.
     async fn fetch_attachment(
         &self,
@@ -110,6 +133,64 @@ impl MailFetcher for RealMailFetcher {
             let email = fetch_email_by_uid(&mut session, uid).await?;
             let _ = session.logout().await;
             Ok(email)
+        })
+        .await
+    }
+
+    async fn move_message(
+        &self,
+        credentials: &MailCredentials,
+        uid: u32,
+        to: Folder,
+    ) -> AppResult<()> {
+        run_with_timeout(async {
+            let mut session = connect(credentials).await?;
+            let moved = async {
+                let destination = folder_for(&mut session, to).await?;
+                select(&mut session, "INBOX").await?;
+                let present = session
+                    .uid_search(format!("UID {uid}"))
+                    .await
+                    .map_err(|e| AppError::Imap(format!("SEARCH failed: {e}")))?;
+                if !present.contains(&uid) {
+                    return Err(AppError::NotFound("Message not found".into()));
+                }
+                move_uid(&mut session, uid, &destination).await
+            }
+            .await;
+            let _ = session.logout().await;
+            moved
+        })
+        .await
+    }
+
+    async fn restore_message(
+        &self,
+        credentials: &MailCredentials,
+        from: Folder,
+        message_id: &str,
+    ) -> AppResult<u32> {
+        run_with_timeout(async {
+            let mut session = connect(credentials).await?;
+            let restored = async {
+                let folder = folder_for(&mut session, from).await?;
+                select(&mut session, &folder).await?;
+                let Some(&uid) = find_message_id(&mut session, message_id).await?.first() else {
+                    return Err(AppError::NotFound(format!(
+                        "The message is no longer in {folder}"
+                    )));
+                };
+                move_uid(&mut session, uid, "INBOX").await?;
+                select(&mut session, "INBOX").await?;
+                find_message_id(&mut session, message_id)
+                    .await?
+                    .first()
+                    .copied()
+                    .ok_or_else(|| AppError::Imap("The message did not arrive in the inbox".into()))
+            }
+            .await;
+            let _ = session.logout().await;
+            restored
         })
         .await
     }
@@ -198,47 +279,186 @@ const SENT_FOLDER_NAMES: &[&str] = &[
     "INBOX.Sent",
 ];
 
-/// Append `raw` to the Sent folder, unless a message with this Message-ID is
-/// already there. Returns false when there is no Sent folder.
-async fn file_in_sent(session: &mut ImapSession, raw: &[u8], message_id: &str) -> AppResult<bool> {
-    let names: Vec<_> = session
+const TRASH_FOLDER_NAMES: &[&str] = &[
+    "Trash",
+    "Deleted Items",
+    "Deleted Messages",
+    "INBOX.Trash",
+    "[Gmail]/Trash",
+    "[Google Mail]/Trash",
+];
+
+/// Gmail archives by taking a message out of the inbox, so its All Mail
+/// folder serves when there is no archive folder.
+const ARCHIVE_FOLDER_NAMES: &[&str] = &[
+    "Archive",
+    "Archives",
+    "INBOX.Archive",
+    "[Gmail]/All Mail",
+    "[Google Mail]/All Mail",
+];
+
+/// Where a message can be moved out of the inbox to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Folder {
+    Trash,
+    Archive,
+}
+
+type NameAttribute<'a> = imap_proto::types::NameAttribute<'a>;
+
+async fn folder_names(session: &mut ImapSession) -> AppResult<Vec<async_imap::types::Name>> {
+    session
         .list(Some(""), Some("*"))
         .await
         .map_err(|e| AppError::Imap(format!("LIST failed: {e}")))?
         .try_collect()
         .await
-        .map_err(|e| AppError::Imap(format!("LIST failed: {e}")))?;
-    let special_use = names.iter().find(|name| {
-        name.attributes()
-            .iter()
-            .any(|attribute| matches!(attribute, imap_proto::types::NameAttribute::Sent))
-    });
-    let by_name = || {
-        SENT_FOLDER_NAMES.iter().find_map(|candidate| {
-            names
-                .iter()
-                .find(|name| name.name().eq_ignore_ascii_case(candidate))
-        })
-    };
-    let Some(folder) = special_use
-        .or_else(by_name)
-        .map(|name| name.name().to_string())
-    else {
-        return Ok(false);
-    };
+        .map_err(|e| AppError::Imap(format!("LIST failed: {e}")))
+}
 
-    session
-        .select(&folder)
+/// The folder the server marks with a special-use attribute (the first
+/// kind in `special` that any folder has), else the first of `names` it has.
+fn find_folder(
+    folders: &[async_imap::types::Name],
+    special: &[fn(&NameAttribute<'_>) -> bool],
+    names: &[&str],
+) -> Option<String> {
+    special
+        .iter()
+        .find_map(|is_kind| {
+            folders
+                .iter()
+                .find(|folder| folder.attributes().iter().any(is_kind))
+        })
+        .or_else(|| {
+            names.iter().find_map(|candidate| {
+                folders
+                    .iter()
+                    .find(|folder| folder.name().eq_ignore_ascii_case(candidate))
+            })
+        })
+        .map(|folder| folder.name().to_string())
+}
+
+/// The account's Trash or archive folder. A missing archive folder is
+/// created, as other mail clients do; a missing Trash is an error, since
+/// deleting would otherwise have nowhere safe to go.
+async fn folder_for(session: &mut ImapSession, folder: Folder) -> AppResult<String> {
+    let folders = folder_names(session).await?;
+    match folder {
+        Folder::Trash => find_folder(
+            &folders,
+            &[|a| matches!(a, NameAttribute::Trash)],
+            TRASH_FOLDER_NAMES,
+        )
+        .ok_or_else(|| AppError::BadRequest("The mail server has no Trash folder".into())),
+        Folder::Archive => {
+            let found = find_folder(
+                &folders,
+                &[
+                    |a| matches!(a, NameAttribute::Archive),
+                    |a| matches!(a, NameAttribute::All),
+                ],
+                ARCHIVE_FOLDER_NAMES,
+            );
+            match found {
+                Some(name) => Ok(name),
+                None => {
+                    session
+                        .create("Archive")
+                        .await
+                        .map_err(|e| AppError::Imap(format!("Could not create Archive: {e}")))?;
+                    Ok("Archive".into())
+                }
+            }
+        }
+    }
+}
+
+/// Move one message out of the selected folder. Uses MOVE where the server
+/// has it, else copies, marks the original deleted, and expunges it.
+async fn move_uid(session: &mut ImapSession, uid: u32, to: &str) -> AppResult<()> {
+    let capabilities = session
+        .capabilities()
         .await
-        .map_err(|e| AppError::Imap(format!("SELECT {folder} failed: {e}")))?;
-    let already_filed = session
+        .map_err(|e| AppError::Imap(format!("CAPABILITY failed: {e}")))?;
+    let uid = uid.to_string();
+    if capabilities.has_str("MOVE") {
+        return session
+            .uid_mv(&uid, to)
+            .await
+            .map_err(|e| AppError::Imap(format!("MOVE to {to} failed: {e}")));
+    }
+    session
+        .uid_copy(&uid, to)
+        .await
+        .map_err(|e| AppError::Imap(format!("COPY to {to} failed: {e}")))?;
+    session
+        .uid_store(&uid, "+FLAGS.SILENT (\\Deleted)")
+        .await
+        .map_err(|e| AppError::Imap(format!("STORE failed: {e}")))?
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| AppError::Imap(format!("STORE failed: {e}")))?;
+    let expunged = if capabilities.has_str("UIDPLUS") {
+        session
+            .uid_expunge(&uid)
+            .await
+            .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {e}")))?
+            .try_collect::<Vec<_>>()
+            .await
+            .map(|_| ())
+    } else {
+        session
+            .expunge()
+            .await
+            .map_err(|e| AppError::Imap(format!("EXPUNGE failed: {e}")))?
+            .try_collect::<Vec<_>>()
+            .await
+            .map(|_| ())
+    };
+    expunged.map_err(|e| AppError::Imap(format!("EXPUNGE failed: {e}")))
+}
+
+/// UIDs in the selected folder with this Message-ID, newest first.
+async fn find_message_id(session: &mut ImapSession, message_id: &str) -> AppResult<Vec<u32>> {
+    let mut uids: Vec<u32> = session
         .uid_search(format!(
             "HEADER Message-ID \"{}\"",
             sanitize_imap_query(message_id)
         ))
         .await
-        .map_err(|e| AppError::Imap(format!("SEARCH failed: {e}")))?;
-    if already_filed.is_empty() {
+        .map_err(|e| AppError::Imap(format!("SEARCH failed: {e}")))?
+        .into_iter()
+        .collect();
+    uids.sort_unstable_by(|a, b| b.cmp(a));
+    Ok(uids)
+}
+
+async fn select(session: &mut ImapSession, folder: &str) -> AppResult<()> {
+    session
+        .select(folder)
+        .await
+        .map(|_| ())
+        .map_err(|e| AppError::Imap(format!("SELECT {folder} failed: {e}")))
+}
+
+/// Append `raw` to the Sent folder, unless a message with this Message-ID is
+/// already there. Returns false when there is no Sent folder.
+async fn file_in_sent(session: &mut ImapSession, raw: &[u8], message_id: &str) -> AppResult<bool> {
+    let folders = folder_names(session).await?;
+    let Some(folder) = find_folder(
+        &folders,
+        &[|a| matches!(a, NameAttribute::Sent)],
+        SENT_FOLDER_NAMES,
+    ) else {
+        return Ok(false);
+    };
+
+    select(session, &folder).await?;
+    if find_message_id(session, message_id).await?.is_empty() {
         session
             .append(&folder, Some("(\\Seen)"), None, raw)
             .await
@@ -253,6 +473,9 @@ pub struct EmailEnvelope {
     pub subject: String,
     pub from: String,
     pub date: Option<DateTime<Utc>>,
+    /// Without angle brackets. Identifies the message after a move changes
+    /// its UID, as undoing a delete needs.
+    pub message_id: Option<String>,
 }
 
 /// One mailbox from an address header: the display name, if any, and the
@@ -534,6 +757,11 @@ fn parse_envelope(msg: &Fetch) -> Option<EmailEnvelope> {
         subject: decode_header_text(envelope.subject.as_ref()),
         from: format_addresses(envelope.from.as_ref()),
         date: parse_imap_date(envelope.date.as_ref()),
+        message_id: envelope.message_id.as_ref().and_then(|id| {
+            let id = String::from_utf8_lossy(id);
+            let id = id.trim().trim_start_matches('<').trim_end_matches('>');
+            (!id.is_empty()).then(|| id.to_string())
+        }),
     })
 }
 

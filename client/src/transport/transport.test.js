@@ -25,6 +25,8 @@ describe('http transport', () => {
     await http.listContacts();
     await http.saveContact({ email: 's@x', name: 'S' });
     await http.deleteContact(7);
+    await http.moveEmail('a1', 12, 'trash');
+    await http.restoreEmail('a1', 'trash', 'id@x');
 
     const calls = fetch.mock.calls.map(([url, init]) => [init.method ?? 'GET', url]);
     expect(calls).toEqual([
@@ -37,6 +39,8 @@ describe('http transport', () => {
       ['GET', '/api/contacts'],
       ['POST', '/api/contacts'],
       ['DELETE', '/api/contacts/7'],
+      ['POST', '/api/accounts/a1/emails/12/move'],
+      ['POST', '/api/accounts/a1/restore'],
     ]);
   });
 
@@ -64,6 +68,8 @@ describe('tauri transport', () => {
     await tauri.deleteContact(7);
     await tauri.downloadAttachment('a1', 12, 0);
     await tauri.showInFolder('C:\\Downloads\\x.pdf');
+    await tauri.moveEmail('a1', 12, 'trash');
+    await tauri.restoreEmail('a1', 'trash', 'id@x');
 
     expect(invoke.mock.calls).toEqual([
       ['list_emails', { accountId: 'a1', since: null }],
@@ -77,6 +83,8 @@ describe('tauri transport', () => {
       ['delete_contact', { id: 7 }],
       ['save_attachment', { accountId: 'a1', uid: 12, index: 0 }],
       ['show_in_folder', { path: 'C:\\Downloads\\x.pdf' }],
+      ['move_email', { accountId: 'a1', uid: 12, to: 'trash' }],
+      ['restore_email', { accountId: 'a1', from: 'trash', messageId: 'id@x' }],
     ]);
   });
 

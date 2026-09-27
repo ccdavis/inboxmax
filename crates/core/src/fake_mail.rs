@@ -6,7 +6,7 @@
 use crate::attachment::{Attachment, safe_filename};
 use crate::error::{AppError, AppResult};
 use crate::imap_client::{
-    EmailEnvelope, FullEmail, MailAddress, MailCredentials, MailFetcher, MailboxSnapshot,
+    EmailEnvelope, Folder, FullEmail, MailAddress, MailCredentials, MailFetcher, MailboxSnapshot,
     SmtpServer,
 };
 use crate::mailbox::{self, RememberRequest};
@@ -198,11 +198,44 @@ impl Generated {
             subject: self.message.subject.to_string(),
             from: self.sender_name.clone(),
             date: Some(self.sent()),
+            message_id: Some(message_id(self.uid)),
         }
     }
 }
 
+fn message_id(uid: u32) -> String {
+    format!("{uid}.{UID_VALIDITY}@fake.inboxmax.invalid")
+}
+
+/// Messages moved out of each mailbox's inbox: (account, UID, where to).
+static MOVED: Mutex<Vec<(String, u32, Folder)>> = Mutex::new(Vec::new());
+
+fn moved() -> std::sync::MutexGuard<'static, Vec<(String, u32, Folder)>> {
+    MOVED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn is_moved(account: &str, uid: u32) -> bool {
+    moved()
+        .iter()
+        .any(|(a, u, _)| *u == uid && a.eq_ignore_ascii_case(account))
+}
+
+/// Put every message moved out of `account`'s inbox back.
+fn forget_moves(account: &str) {
+    moved().retain(|(a, _, _)| !a.eq_ignore_ascii_case(account));
+}
+
+/// The messages in a mailbox's inbox (those not moved out).
 fn generate(credentials: &MailCredentials) -> Vec<Generated> {
+    generate_all(credentials)
+        .into_iter()
+        .filter(|g| !is_moved(&credentials.email, g.uid))
+        .collect()
+}
+
+fn generate_all(credentials: &MailCredentials) -> Vec<Generated> {
     let now = Utc::now();
     let demo = is_demo_account(&credentials.email, &credentials.host);
     let domain = credentials
@@ -258,6 +291,7 @@ fn addresses(mailboxes: &[Mailbox]) -> Vec<MailAddress> {
 /// couple of days ago: the newest few messages unseen, older ones already
 /// seen, and a couple remembered. Everything the inbox does is then on show.
 pub async fn reset_demo(db: &SqlitePool, account_id: &str) -> AppResult<()> {
+    forget_moves(DEMO_EMAIL);
     let envelopes = envelopes(&MailCredentials {
         host: DEMO_HOST.into(),
         port: 993,
@@ -339,6 +373,28 @@ impl MailFetcher for WithDemoMailbox {
     ) -> AppResult<Attachment> {
         self.pick(credentials)
             .fetch_attachment(credentials, uid, index)
+            .await
+    }
+
+    async fn move_message(
+        &self,
+        credentials: &MailCredentials,
+        uid: u32,
+        to: Folder,
+    ) -> AppResult<()> {
+        self.pick(credentials)
+            .move_message(credentials, uid, to)
+            .await
+    }
+
+    async fn restore_message(
+        &self,
+        credentials: &MailCredentials,
+        from: Folder,
+        message_id: &str,
+    ) -> AppResult<u32> {
+        self.pick(credentials)
+            .restore_message(credentials, from, message_id)
             .await
     }
 
@@ -474,7 +530,7 @@ impl MailFetcher for FakeMailFetcher {
                 )
             }),
             body_text: message.text.map(Into::into),
-            message_id: Some(format!("{uid}.{UID_VALIDITY}@fake.inboxmax.invalid")),
+            message_id: Some(message_id(uid)),
             references: message.thread.iter().map(|id| id.to_string()).collect(),
             attachments: attachments(message)
                 .iter()
@@ -495,6 +551,44 @@ impl MailFetcher for FakeMailFetcher {
             .find(|g| g.uid == uid)
             .and_then(|g| attachments(g.message).into_iter().nth(index))
             .ok_or_else(|| AppError::NotFound("Attachment not found".into()))
+    }
+
+    async fn move_message(
+        &self,
+        credentials: &MailCredentials,
+        uid: u32,
+        to: Folder,
+    ) -> AppResult<()> {
+        if !generate(credentials).iter().any(|g| g.uid == uid) {
+            return Err(AppError::NotFound("Message not found".into()));
+        }
+        moved().push((credentials.email.clone(), uid, to));
+        Ok(())
+    }
+
+    async fn restore_message(
+        &self,
+        credentials: &MailCredentials,
+        from: Folder,
+        id: &str,
+    ) -> AppResult<u32> {
+        let mut moved = moved();
+        let position = moved.iter().position(|(account, uid, folder)| {
+            account.eq_ignore_ascii_case(&credentials.email)
+                && *folder == from
+                && message_id(*uid) == id
+        });
+        let Some(position) = position else {
+            let folder = match from {
+                Folder::Trash => "Trash",
+                Folder::Archive => "Archive",
+            };
+            return Err(AppError::NotFound(format!(
+                "The message is no longer in {folder}"
+            )));
+        };
+        // A real server would give it a new UID; the fake keeps the old one.
+        Ok(moved.remove(position).1)
     }
 
     async fn search(
@@ -820,6 +914,94 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, AppError::NotFound(_)));
         assert_eq!(sent_messages("forwarder@example.com").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn moved_messages_leave_the_inbox_and_can_come_back() {
+        let db = db().await;
+        let account = connected("mover@example.com");
+        let creds = account.mail_credentials();
+        async fn inbox(creds: &MailCredentials) -> Vec<u32> {
+            let week_ago = (Utc::now() - Duration::days(7)).date_naive();
+            FakeMailFetcher
+                .fetch_envelopes(creds, week_ago)
+                .await
+                .unwrap()
+                .envelopes
+                .into_iter()
+                .map(|e| e.uid)
+                .collect()
+        }
+        sqlx::query("INSERT INTO accounts (id, email, imap_host, smtp_host, user_id, uid_validity) VALUES ('a', 'mover@example.com', 'imap.example.com', 'smtp.example.com', 'u', 1)")
+            .execute(&db)
+            .await
+            .unwrap();
+        mailbox::remember(
+            &db,
+            "a",
+            998,
+            RememberRequest {
+                subject: Some("API spec".into()),
+                sender: None,
+                date: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        mailbox::move_email(&db, &FakeMailFetcher, &account, 998, Folder::Trash)
+            .await
+            .unwrap();
+        assert!(!inbox(&creds).await.contains(&998));
+        assert!(FakeMailFetcher.fetch_email(&creds, 998).await.is_err());
+        assert!(
+            FakeMailFetcher
+                .search(&creds, "API spec")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            mailbox::list_remembered(&db, "a").await.unwrap().is_empty(),
+            "a moved message is no longer remembered"
+        );
+        // It is not in the archive, and cannot be moved twice.
+        assert!(
+            mailbox::restore_email(
+                &FakeMailFetcher,
+                &account,
+                Folder::Archive,
+                &message_id(998)
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            mailbox::move_email(&db, &FakeMailFetcher, &account, 998, Folder::Archive)
+                .await
+                .is_err()
+        );
+
+        let restored = mailbox::restore_email(
+            &FakeMailFetcher,
+            &account,
+            Folder::Trash,
+            &format!("<{}>", message_id(998)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(restored.uid, 998);
+        assert!(inbox(&creds).await.contains(&998));
+        let again =
+            mailbox::restore_email(&FakeMailFetcher, &account, Folder::Trash, &message_id(998))
+                .await
+                .unwrap_err();
+        assert_eq!(again.to_string(), "The message is no longer in Trash");
+        assert!(
+            mailbox::restore_email(&FakeMailFetcher, &account, Folder::Trash, " <> ")
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

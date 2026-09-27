@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import App from './App';
 import DesktopApp from './DesktopApp';
@@ -15,6 +15,8 @@ vi.mock('./api', () => ({
   connectAccount: vi.fn(),
   connectDemo: vi.fn(),
   sendEmail: vi.fn(),
+  moveEmail: vi.fn(),
+  restoreEmail: vi.fn(),
   searchContacts: vi.fn(),
   listContacts: vi.fn(),
   saveContact: vi.fn(),
@@ -209,6 +211,97 @@ describe('inbox page', () => {
 
     expect(await screen.findByText('Home news')).toBeInTheDocument();
     expect(screen.queryByText(/Your mail connection ended/)).toBeNull();
+  });
+
+  describe('archive and delete', () => {
+    const WITH_IDS = [
+      { uid: 12, subject: 'Twelve', from: 'A', date: now, message_id: 'twelve@x' },
+      { uid: 30, subject: 'Thirty', from: 'B', date: now, message_id: 'thirty@x' },
+    ];
+
+    beforeEach(() => {
+      api.getEmails.mockImplementation(async () => inbox(WITH_IDS));
+      api.moveEmail.mockResolvedValue({ ok: true });
+    });
+
+    it('deletes from the list, and Undo brings it back', async () => {
+      api.restoreEmail.mockResolvedValue({ uid: 31 });
+      renderInbox();
+      await screen.findByText('Thirty');
+      fireEvent.click(screen.getByRole('button', { name: 'Delete “Thirty”' }));
+
+      expect(await screen.findByRole('status')).toHaveTextContent('Moved to Trash.');
+      expect(api.moveEmail).toHaveBeenCalledWith('work', 30, 'trash');
+      expect(screen.queryByText('Thirty')).toBeNull();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+      expect(await screen.findByRole('status')).toHaveTextContent('Moved back to the inbox.');
+      expect(api.restoreEmail).toHaveBeenCalledWith('work', 'trash', 'thirty@x');
+      expect(await screen.findByText('Thirty')).toBeInTheDocument();
+    });
+
+    it('archives from the reader and returns to the list', async () => {
+      api.getEmail.mockResolvedValue({
+        uid: 12,
+        subject: 'Twelve',
+        from: [{ name: 'A', email: 'a@x.example' }],
+        to: [],
+        date: now,
+        body_text: 'Hi',
+        message_id: 'twelve@x',
+        attachments: [],
+      });
+      renderInbox();
+      fireEvent.click(await screen.findByText('Twelve'));
+      await screen.findByRole('heading', { name: 'Twelve', level: 1 });
+      fireEvent.click(screen.getByRole('button', { name: 'Archive' }));
+
+      expect(await screen.findByRole('status')).toHaveTextContent('Archived.');
+      expect(api.moveEmail).toHaveBeenCalledWith('work', 12, 'archive');
+      expect(screen.queryByRole('heading', { name: 'Twelve', level: 1 })).toBeNull();
+      expect(screen.getByText('Thirty')).toBeInTheDocument();
+    });
+
+    it('restores the star of a remembered message it brings back', async () => {
+      api.getRemembered.mockResolvedValue([{ id: 1, email_uid: 30, subject: 'Thirty', sender: 'B', date: null, added_at: 0 }]);
+      api.rememberEmail.mockResolvedValue({ ok: true });
+      api.restoreEmail.mockResolvedValue({ uid: 31 });
+      renderInbox();
+      // Starred in the list (and listed under Remembered).
+      await screen.findAllByRole('button', { name: 'Forget “Thirty”' });
+      fireEvent.click(screen.getByRole('button', { name: 'Delete “Thirty”' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Undo' }));
+      await waitFor(() => expect(api.rememberEmail).toHaveBeenCalledWith('work', 31, {
+        subject: 'Thirty', sender: 'B', date: expect.any(Number),
+      }));
+    });
+
+    it('explains a failed move and keeps the message', async () => {
+      api.moveEmail.mockRejectedValue(new Error('The mail server has no Trash folder'));
+      renderInbox();
+      await screen.findByText('Thirty');
+      fireEvent.click(screen.getByRole('button', { name: 'Delete “Thirty”' }));
+      expect(await screen.findByRole('alert')).toHaveTextContent('Could not delete “Thirty”: The mail server has no Trash folder');
+      expect(screen.getByText('Thirty')).toBeInTheDocument();
+    });
+
+    it('offers no Undo for a message without a Message-ID', async () => {
+      api.getEmails.mockImplementation(async () => inbox([{ uid: 30, subject: 'Thirty', from: 'B', date: now, message_id: null }]));
+      renderInbox();
+      await screen.findByText('Thirty');
+      fireEvent.click(screen.getByRole('button', { name: 'Archive “Thirty”' }));
+      expect(await screen.findByRole('status')).toHaveTextContent('Archived.');
+      expect(screen.queryByRole('button', { name: 'Undo' })).toBeNull();
+    });
+
+    it('reports an undo that fails', async () => {
+      api.restoreEmail.mockRejectedValue(new Error('The message is no longer in Trash'));
+      renderInbox();
+      await screen.findByText('Thirty');
+      fireEvent.click(screen.getByRole('button', { name: 'Delete “Thirty”' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Undo' }));
+      expect(await screen.findByRole('alert')).toHaveTextContent('Could not undo: The message is no longer in Trash');
+    });
   });
 
   describe('compose', () => {

@@ -26,6 +26,38 @@ fn database_path(app: &tauri::App) -> anyhow::Result<PathBuf> {
     Ok(dir.join("inboxmax.db"))
 }
 
+/// The window's preferred size, in logical pixels.
+const PREFERRED_SIZE: (f64, f64) = (1200.0, 800.0);
+/// The most of the screen's work area the window takes at first.
+const MAX_SCREEN_SHARE: f64 = 0.9;
+
+/// The first window size for a work area of `screen` logical pixels: the
+/// preferred size, shrunk to fit. Wide enough for the sidebar layout on any
+/// screen that can show it.
+fn initial_size(screen: (f64, f64)) -> (f64, f64) {
+    (
+        PREFERRED_SIZE.0.min(screen.0 * MAX_SCREEN_SHARE),
+        PREFERRED_SIZE.1.min(screen.1 * MAX_SCREEN_SHARE),
+    )
+}
+
+/// Size the main window for the monitor it opened on, and center it. A
+/// fixed size in the config came out at physical pixels on scaled Windows
+/// displays (1100 px at 150% is 734 CSS pixels: the phone layout).
+fn fit_to_screen(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    let Some(monitor) = window.current_monitor()? else {
+        return Ok(());
+    };
+    let scale = monitor.scale_factor();
+    let area = monitor.work_area().size;
+    let (width, height) = initial_size((
+        f64::from(area.width) / scale,
+        f64::from(area.height) / scale,
+    ));
+    window.set_size(tauri::LogicalSize::new(width, height))?;
+    window.center()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -47,6 +79,11 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            if let Some(window) = app.get_webview_window("main")
+                && let Err(e) = fit_to_screen(&window)
+            {
+                tracing::warn!("Could not size the window: {e}");
+            }
             let path = database_path(app)?;
             let state = tauri::async_runtime::block_on(async {
                 let db = inboxmax_core::db::init_pool_at(&path).await?;
@@ -76,6 +113,8 @@ pub fn run() {
             commands::get_email,
             commands::search_emails,
             commands::send_email,
+            commands::move_email,
+            commands::restore_email,
             commands::save_attachment,
             commands::show_in_folder,
             commands::list_contacts,
@@ -89,4 +128,19 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Inbox Max");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::initial_size;
+
+    #[test]
+    fn the_first_window_fits_the_screen_and_prefers_room_for_the_sidebar() {
+        // A 1920x1080 display at 150% (the taskbar leaves 688 of 720).
+        assert_eq!(initial_size((1280.0, 688.0)), (1152.0, 619.2));
+        // Room to spare: the preferred size.
+        assert_eq!(initial_size((2560.0, 1400.0)), (1200.0, 800.0));
+        // A small screen gets most of it rather than overflowing.
+        assert_eq!(initial_size((800.0, 600.0)), (720.0, 540.0));
+    }
 }

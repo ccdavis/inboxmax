@@ -7,8 +7,9 @@ use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use axum_extra::extract::CookieJar;
 use inboxmax_core::attachment;
+use inboxmax_core::imap_client::Folder;
 use inboxmax_core::imap_client::{EmailEnvelope, FullEmail};
-use inboxmax_core::mailbox::{self, EmailListResponse};
+use inboxmax_core::mailbox::{self, EmailListResponse, Restored};
 use inboxmax_core::outgoing::{SendReceipt, SendRequest};
 use serde::Deserialize;
 
@@ -25,6 +26,48 @@ pub struct SearchQuery {
 #[derive(Deserialize)]
 pub struct WatermarkRequest {
     pub uid: i64,
+}
+
+#[derive(Deserialize)]
+pub struct MoveRequest {
+    pub to: Folder,
+}
+
+#[derive(Deserialize)]
+pub struct RestoreRequest {
+    pub from: Folder,
+    pub message_id: String,
+}
+
+/// POST /api/accounts/{account_id}/emails/{uid}/move — to Trash or the archive.
+pub async fn move_email(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((account_id, uid)): Path<(String, i64)>,
+    Json(request): Json<MoveRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    let account = require_account(&state, &jar, &account_id).await?;
+    mailbox::move_email(&state.db, state.mail.as_ref(), &account, uid, request.to).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// POST /api/accounts/{account_id}/restore — undo a move.
+pub async fn restore_email(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(account_id): Path<String>,
+    Json(request): Json<RestoreRequest>,
+) -> AppResult<Json<Restored>> {
+    let account = require_account(&state, &jar, &account_id).await?;
+    Ok(Json(
+        mailbox::restore_email(
+            state.mail.as_ref(),
+            &account,
+            request.from,
+            &request.message_id,
+        )
+        .await?,
+    ))
 }
 
 /// GET /api/accounts/{account_id}/emails?since=

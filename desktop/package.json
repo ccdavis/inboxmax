@@ -9,7 +9,7 @@
     "build": "tauri build",
     "icons": "tauri icon icons/source.png",
     "build:test": "tauri build --debug --no-bundle --features fake-mail",
-    "test:e2e": "node --test e2e/*.test.mjs",
+    "test:e2e": "node --test --test-concurrency=1 e2e/*.test.mjs",
     "inspect:a11y": "node e2e/inspect-a11y.mjs"
   },
   "devDependencies": {
