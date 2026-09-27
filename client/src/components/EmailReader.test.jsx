@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import EmailReader from './EmailReader';
+import { sanitizeEmailHtml } from '../utils/emailHtml';
 
 // Mock the api module
 vi.mock('../api', () => ({
@@ -120,6 +121,71 @@ describe('EmailReader', () => {
     await waitFor(() => expect(heading).toHaveFocus());
     expect(screen.getByText(/Images in this email are blocked/)).toBeInTheDocument();
     expect(screen.getByText('Hi').closest('.prose')).not.toBeNull();
+  });
+
+  describe('images on request', () => {
+    const IMAGES = '<p>Hello</p>'
+      + '<img src="https://cdn.test/photo.png" alt="Photo" width="300" onerror="alert(1)" style="border:1px">'
+      + '<img src="cid:logo@x" alt="Logo">'
+      + '<img src="javascript:alert(1)">'
+      + '<img src="data:image/png;base64,iVBORw0KGgo=" alt="Inline">';
+
+    function show(uid, bodyHtml) {
+      api.getEmail.mockImplementation(async (_account, requested) => ({
+        uid: requested,
+        subject: `Message ${requested}`,
+        from: [{ name: null, email: 'shop@x.example' }],
+        to: [],
+        date: null,
+        body_html: bodyHtml,
+        body_text: null,
+      }));
+      return render(<EmailReader accountId="a" emailUid={uid} onBack={() => {}} />);
+    }
+
+    it('loads images only when asked, without a referrer, and only ones it can load', async () => {
+      show(7, IMAGES);
+      await screen.findByText('Hello');
+      expect(document.querySelector('img')).toBeNull();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Show images' }));
+      const images = [...document.querySelectorAll('article img')];
+      expect(images.map((img) => img.getAttribute('src'))).toEqual([
+        'https://cdn.test/photo.png',
+        'data:image/png;base64,iVBORw0KGgo=',
+      ]);
+      const [photo] = images;
+      expect(photo).toHaveAttribute('referrerpolicy', 'no-referrer');
+      expect(photo).toHaveAttribute('alt', 'Photo');
+      expect(photo).toHaveAttribute('width', '300');
+      expect(photo).not.toHaveAttribute('onerror');
+      expect(photo).not.toHaveAttribute('style');
+      expect(screen.queryByText(/Images in this email are blocked/)).toBeNull();
+    });
+
+    it('leaves no empty paragraph where an image could not be shown', () => {
+      const html = sanitizeEmailHtml('<p><img src="cid:logo@x"></p><p>Text <img src="cid:y"></p>', { images: true });
+      expect(html).toBe('<p>Text </p>');
+    });
+
+    it('blocks images again for the next message', async () => {
+      const { rerender } = show(7, IMAGES);
+      await screen.findByText('Hello');
+      fireEvent.click(screen.getByRole('button', { name: 'Show images' }));
+      expect(document.querySelector('article img')).not.toBeNull();
+
+      rerender(<EmailReader accountId="a" emailUid={8} onBack={() => {}} />);
+      await screen.findByRole('heading', { name: 'Message 8' });
+      expect(document.querySelector('article img')).toBeNull();
+      expect(screen.getByRole('button', { name: 'Show images' })).toBeInTheDocument();
+    });
+
+    it('offers nothing when no image could be shown anyway', async () => {
+      show(9, '<p>Hello</p><img src="cid:logo@x"><img src="javascript:alert(1)">');
+      await screen.findByText('Hello');
+      expect(screen.queryByText(/Images in this email are blocked/)).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Show images' })).toBeNull();
+    });
   });
 
   describe('headers', () => {

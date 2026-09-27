@@ -105,6 +105,28 @@ describe('Inbox Max desktop features', () => {
       await session.find('main li', { text: 'Team standup notes' });
     }));
 
+  it('shows images on request, which the app security policy lets load', () =>
+    withApp(async (session) => {
+      await (await session.find('input[aria-label^="Search emails"]')).type('shipped\n');
+      await click(session, 'main li button', 'Your order has shipped!');
+      await session.find('article', { text: 'Images in this email are blocked' });
+      assert.equal(await session.execute('return document.querySelectorAll("article img").length'), 0);
+
+      await session.execute(`
+        window.__blocked = [];
+        document.addEventListener('securitypolicyviolation', (e) => window.__blocked.push(e.blockedURI));
+      `);
+      await click(session, 'article button', 'Show images');
+      await session.find('article img[alt="Wireless headphones"]');
+      const drawn = await session.execute(`
+        const img = document.querySelector('article img[alt="Wireless headphones"]');
+        return img.decode().then(() => img.naturalWidth, () => 0);
+      `);
+      assert.equal(drawn, 160);
+      // The remote pixel's host does not exist, but the policy let it try.
+      assert.deepEqual(await session.execute('return window.__blocked'), []);
+    }));
+
   it('reads the server folders: saves from Trash, moves back, and shows Junk', () =>
     withApp(async (session) => {
       await click(session, 'main li button', 'Quick question about the API spec');

@@ -55,6 +55,8 @@ struct FakeMessage {
     delivery_delay_minutes: i64,
     /// A plain-text body instead of the generated HTML one.
     text: Option<&'static str>,
+    /// An HTML body instead of the generated one.
+    html: Option<&'static str>,
     /// Message-IDs of earlier messages in the thread (References).
     thread: &'static [&'static str],
     /// (file name as sent, content type, contents)
@@ -69,10 +71,23 @@ const fn message(from: Mailbox, subject: &'static str) -> FakeMessage {
         cc: &[],
         delivery_delay_minutes: 0,
         text: None,
+        html: None,
         thread: &[],
         attachments: &[],
     }
 }
+
+/// The remote image is on a host where nothing answers.
+const SHIPPED_HTML: &str = "<p><img src=\"cid:logo@shipment.example\" alt=\"Logo\"></p>\
+<h2>Your order is on its way</h2>\
+<p><img alt=\"Wireless headphones\" width=\"160\" height=\"120\" src=\"data:image/svg+xml,\
+%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='120'%3E\
+%3Crect width='160' height='120' rx='12' fill='%236366f1'/%3E\
+%3Ctext x='80' y='68' font-family='sans-serif' font-size='16' fill='white' text-anchor='middle'%3E\
+Headphones%3C/text%3E%3C/svg%3E\"></p>\
+<p>Wireless headphones, arriving Thursday.</p>\
+<p><a href=\"https://example.com/track\">Track your package</a></p>\
+<img src=\"https://images.inboxmax.invalid/open.gif?id=demo\" width=\"1\" height=\"1\" alt=\"\">";
 
 const MESSAGES: &[FakeMessage] = &[
     FakeMessage {
@@ -119,10 +134,15 @@ const MESSAGES: &[FakeMessage] = &[
             "Invitation: Design review @ Wed 2pm",
         )
     },
-    message(
-        ("Amazon", "shipment-tracking@amazon.com"),
-        "Your order has shipped!",
-    ),
+    FakeMessage {
+        // Images, as marketing mail has them: a picture, a tracking pixel
+        // on a remote server, and an inline part the app cannot show.
+        html: Some(SHIPPED_HTML),
+        ..message(
+            ("Amazon", "shipment-tracking@amazon.com"),
+            "Your order has shipped!",
+        )
+    },
     FakeMessage {
         reply_to: Some(("Acme Corp Billing", "billing@acme.example")),
         attachments: &[
@@ -283,6 +303,9 @@ fn full_email(credentials: &MailCredentials, generated: &Generated) -> FullEmail
         date: Some(generated.sent()),
         received: Some(generated.received),
         body_html: message.text.is_none().then(|| {
+            if let Some(html) = message.html {
+                return html.to_string();
+            }
             format!(
                 "<h2>{subject}</h2><p>This is a generated message from the demo mailbox.</p>\
                  <ul><li>Sender: {name}</li><li>UID: {uid}</li></ul>\

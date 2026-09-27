@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import DOMPurify from 'dompurify';
+import { hasLoadableImages, sanitizeEmailHtml } from '../utils/emailHtml';
 import * as api from '../api';
 import Spinner from './Spinner';
 import { formatFullDate } from '../utils/dates';
@@ -9,27 +9,6 @@ import { formatSize } from '../utils/files';
 import { canMoveToInbox, folderLabel } from '../utils/folders';
 import { ArchiveIcon, TrashIcon } from './icons';
 
-function sanitizeEmailHtml(html) {
-  // No img, style or class attributes: remote images and CSS backgrounds are
-  // the common tracking channels, and dropping inline styles lets the email
-  // follow the app's light/dark theme.
-  const clean = DOMPurify.sanitize(html, {
-    ALLOWED_TAGS: [
-      'p', 'br', 'b', 'i', 'u', 's', 'strong', 'em', 'small', 'sub', 'sup', 'a', 'div', 'span',
-      'table', 'caption', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th',
-      'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-      'ul', 'ol', 'li', 'dl', 'dt', 'dd', 'blockquote', 'pre', 'code', 'hr',
-    ],
-    ALLOWED_ATTR: ['href', 'colspan', 'rowspan'],
-  });
-  const template = document.createElement('template');
-  template.innerHTML = clean;
-  for (const link of template.content.querySelectorAll('a[href]')) {
-    link.setAttribute('target', '_blank');
-    link.setAttribute('rel', 'noopener noreferrer');
-  }
-  return template.innerHTML;
-}
 
 // Sender and server clocks disagree by seconds routinely; beyond this the
 // sent time is worth showing next to the received time.
@@ -214,6 +193,8 @@ function BackButton({ onBack, children }) {
  */
 export default function EmailReader({ accountId, emailUid, folder, onBack, me, onReply, onMove, onMoveToInbox }) {
   const [request, setRequest] = useState({ key: null, email: null, error: null });
+  // The message whose images the user asked to see; only ever that one.
+  const [imagesShownFor, setImagesShownFor] = useState(null);
   const headingRef = useRef(null);
   const folderKind = folder?.kind ?? null;
   // UIDs are only unique within one folder.
@@ -274,8 +255,9 @@ export default function EmailReader({ accountId, emailUid, folder, onBack, me, o
     api.openExternal(link.href).catch(() => {});
   };
 
-  const bodyHtml = email.body_html ? sanitizeEmailHtml(email.body_html) : null;
-  const imagesBlocked = Boolean(email.body_html && /<img\b/i.test(email.body_html));
+  const showImages = imagesShownFor === key;
+  const bodyHtml = email.body_html ? sanitizeEmailHtml(email.body_html, { images: showImages }) : null;
+  const imagesBlocked = !showImages && hasLoadableImages(email.body_html);
 
   return (
     <article className="flex flex-col h-full">
@@ -321,13 +303,21 @@ export default function EmailReader({ accountId, emailUid, folder, onBack, me, o
 
       <div className="flex-1 overflow-y-auto bg-canvas p-4">
         {imagesBlocked && (
-          <p className="mb-3 text-xs text-ink-muted bg-hover rounded px-3 py-2">
-            Images in this email are blocked to protect your privacy.
+          <p className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-muted bg-hover rounded px-3 py-2">
+            <span>Images in this email are blocked to protect your privacy.</span>
+            {/* Loading them tells the sender the email was opened, and when. */}
+            <button
+              type="button"
+              onClick={() => setImagesShownFor(key)}
+              className="font-medium text-accent hover:text-accent-hover underline-offset-2 hover:underline rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+            >
+              Show images
+            </button>
           </p>
         )}
         {bodyHtml ? (
           <div
-            className="prose prose-sm prose-slate dark:prose-invert max-w-none break-words prose-a:text-accent"
+            className="prose prose-sm prose-slate dark:prose-invert max-w-none break-words prose-a:text-accent prose-img:inline-block prose-img:my-2 prose-img:max-w-full prose-img:h-auto"
             onClick={handleBodyClick}
             dangerouslySetInnerHTML={{ __html: bodyHtml }}
           />
