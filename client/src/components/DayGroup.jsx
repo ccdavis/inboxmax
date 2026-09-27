@@ -28,6 +28,7 @@ export default function DayGroup({ label, emails, selectedUid, onSelectEmail }) 
                   type="button"
                   data-closes-sidebar
                   onClick={() => onSelectEmail(email)}
+                  aria-label={`${senderName(email.from)}: ${email.subject || '(no subject)'}`}
                   aria-current={selected ? 'true' : undefined}
                   className={`w-full text-left px-3 py-1.5 transition text-sm truncate text-ink-soft focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500 ${
                     selected ? 'bg-selected' : 'hover:bg-hover'

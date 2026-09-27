@@ -4,16 +4,20 @@ use axum::http::{Request, StatusCode};
 use chrono::{NaiveDate, Utc};
 use http_body_util::BodyExt;
 use inboxmax_core::ConnectedAccount;
+use inboxmax_core::attachment::Attachment;
+use inboxmax_core::outgoing::{OutgoingEmail, SendReceipt};
 use inboxmax_server::error::{AppError, AppResult};
 use inboxmax_server::imap_client::{
-    EmailEnvelope, FullEmail, MailCredentials, MailFetcher, MailboxSnapshot,
+    EmailEnvelope, Folder, FolderInfo, FullEmail, MailAddress, MailCredentials, MailFetcher,
+    MailboxSnapshot, SmtpServer,
 };
 use inboxmax_server::rate_limit::AttemptLimiter;
-use inboxmax_server::session::SessionStore;
+use inboxmax_server::session::{SessionStore, UserSession};
 use inboxmax_server::{AppState, api_router};
 use serde_json::Value;
 use sqlx::SqlitePool;
 use std::sync::Arc;
+use std::sync::Mutex;
 use tower::ServiceExt;
 
 // ---------------------------------------------------------------------------
@@ -25,16 +29,37 @@ const MISSING_UID: u32 = 404;
 
 struct MockMailFetcher {
     envelopes: Vec<EmailEnvelope>,
+    /// What was sent, and through which SMTP server.
+    sent: Mutex<Vec<(SmtpServer, OutgoingEmail)>>,
 }
 
 impl MockMailFetcher {
     fn with_envelopes(envelopes: Vec<EmailEnvelope>) -> Self {
-        Self { envelopes }
+        Self {
+            envelopes,
+            sent: Mutex::new(Vec::new()),
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl MailFetcher for MockMailFetcher {
+    async fn send(
+        &self,
+        _credentials: &MailCredentials,
+        smtp: &SmtpServer,
+        email: &OutgoingEmail,
+    ) -> AppResult<SendReceipt> {
+        self.sent
+            .lock()
+            .unwrap()
+            .push((smtp.clone(), email.clone()));
+        Ok(SendReceipt {
+            message_id: email.message_id.clone(),
+            saved_to_sent: false,
+        })
+    }
+
     async fn fetch_envelopes(
         &self,
         _credentials: &MailCredentials,
@@ -53,12 +78,33 @@ impl MailFetcher for MockMailFetcher {
         Ok(FullEmail {
             uid,
             subject: "Test".into(),
-            from: "test@example.com".into(),
-            to: "me@example.com".into(),
+            from: vec![MailAddress::new(Some("Tess"), "test@example.com")],
+            reply_to: vec![],
+            to: vec![MailAddress::new(None, "me@example.com")],
+            cc: vec![],
             date: Some(Utc::now()),
+            received: Some(Utc::now()),
             body_html: None,
             body_text: Some("body".into()),
             message_id: None,
+            references: vec![],
+            attachments: vec![],
+        })
+    }
+
+    async fn fetch_attachment(
+        &self,
+        _credentials: &MailCredentials,
+        uid: u32,
+        index: usize,
+    ) -> AppResult<Attachment> {
+        if (uid, index) != (100, 0) {
+            return Err(AppError::NotFound("Attachment not found".into()));
+        }
+        Ok(Attachment {
+            filename: "Grüße \"final\".pdf".into(),
+            content_type: "application/pdf".into(),
+            data: b"%PDF-1.4".to_vec(),
         })
     }
 
@@ -73,6 +119,53 @@ impl MailFetcher for MockMailFetcher {
     async fn verify_credentials(&self, _credentials: &MailCredentials) -> AppResult<()> {
         Ok(())
     }
+
+    async fn list_folders(&self, _credentials: &MailCredentials) -> AppResult<Vec<FolderInfo>> {
+        Ok(vec![
+            FolderInfo {
+                kind: Folder::Sent,
+                name: "Sent Items".into(),
+            },
+            FolderInfo {
+                kind: Folder::Junk,
+                name: "Spam".into(),
+            },
+        ])
+    }
+
+    async fn fetch_folder(
+        &self,
+        _credentials: &MailCredentials,
+        folder: Folder,
+    ) -> AppResult<Vec<EmailEnvelope>> {
+        match folder {
+            Folder::Junk => Ok(self.envelopes.clone()),
+            _ => Err(AppError::NotFound(
+                "The mail server has no such folder".into(),
+            )),
+        }
+    }
+
+    async fn fetch_folder_email(
+        &self,
+        credentials: &MailCredentials,
+        folder: Folder,
+        uid: u32,
+    ) -> AppResult<FullEmail> {
+        self.fetch_folder(credentials, folder).await?;
+        self.fetch_email(credentials, uid).await
+    }
+
+    async fn fetch_folder_attachment(
+        &self,
+        credentials: &MailCredentials,
+        folder: Folder,
+        uid: u32,
+        index: usize,
+    ) -> AppResult<Attachment> {
+        self.fetch_folder(credentials, folder).await?;
+        self.fetch_attachment(credentials, uid, index).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -86,12 +179,14 @@ fn sample_envelopes() -> Vec<EmailEnvelope> {
             subject: "Hello".into(),
             from: "alice@example.com".into(),
             date: Some(Utc::now()),
+            message_id: None,
         },
         EmailEnvelope {
             uid: 99,
             subject: "Older".into(),
             from: "bob@example.com".into(),
             date: Some(Utc::now() - chrono::Duration::hours(2)),
+            message_id: None,
         },
     ]
 }
@@ -105,12 +200,20 @@ async fn setup_test_db() -> SqlitePool {
 const ACCOUNT_ID: &str = "test-account-id";
 const SESSION_TOKEN: &str = "test-session-token";
 
+const USER_ID: &str = "test-user";
+
 async fn seed_account(pool: &SqlitePool) {
+    sqlx::query("INSERT INTO users (id, email, password_hash) VALUES (?, 'user@example.com', '!')")
+        .bind(USER_ID)
+        .execute(pool)
+        .await
+        .unwrap();
     sqlx::query(
-        "INSERT INTO accounts (id, email, imap_host, imap_port, smtp_host, smtp_port)
-         VALUES (?, 'test@example.com', 'imap.test.com', 993, 'smtp.test.com', 587)",
+        "INSERT INTO accounts (id, email, imap_host, imap_port, smtp_host, smtp_port, user_id)
+         VALUES (?, 'test@example.com', 'imap.test.com', 993, 'smtp.test.com', 587, ?)",
     )
     .bind(ACCOUNT_ID)
+    .bind(USER_ID)
     .execute(pool)
     .await
     .unwrap();
@@ -121,9 +224,23 @@ fn build_app(state: AppState) -> Router {
 }
 
 async fn build_state(envelopes: Vec<EmailEnvelope>) -> AppState {
+    build_state_with(Arc::new(MockMailFetcher::with_envelopes(envelopes))).await
+}
+
+async fn build_state_with(mail: Arc<MockMailFetcher>) -> AppState {
     let pool = setup_test_db().await;
     seed_account(&pool).await;
     let sessions = SessionStore::new();
+    sessions
+        .set_user(
+            SESSION_TOKEN,
+            UserSession {
+                user_id: USER_ID.into(),
+                email: "user@example.com".into(),
+                display_name: None,
+            },
+        )
+        .await;
     sessions
         .add_account(
             SESSION_TOKEN,
@@ -133,15 +250,30 @@ async fn build_state(envelopes: Vec<EmailEnvelope>) -> AppState {
                 password: "pass".into(),
                 imap_host: "imap.test.com".into(),
                 imap_port: 993,
+                smtp: SmtpServer {
+                    host: "smtp.test.com".into(),
+                    port: 587,
+                },
             },
         )
         .await;
     AppState {
         db: pool,
         sessions,
-        mail: Arc::new(MockMailFetcher::with_envelopes(envelopes)),
+        mail,
         limiter: AttemptLimiter::new(),
     }
+}
+
+fn send_request(body: Value, signed_in: bool) -> Request<Body> {
+    let mut request = Request::builder()
+        .uri(format!("/api/accounts/{ACCOUNT_ID}/send"))
+        .method("POST")
+        .header("Content-Type", "application/json");
+    if signed_in {
+        request = request.header("Cookie", format!("inboxmax_session={SESSION_TOKEN}"));
+    }
+    request.body(Body::from(body.to_string())).unwrap()
 }
 
 fn emails_request(uri: &str) -> Request<Body> {
@@ -315,12 +447,14 @@ async fn list_emails_filters_imap_day_results_to_the_exact_timestamp() {
             subject: "New".into(),
             from: "new@example.com".into(),
             date: Some(now),
+            message_id: None,
         },
         EmailEnvelope {
             uid: 1,
             subject: "Before cursor".into(),
             from: "old@example.com".into(),
             date: Some(now - chrono::Duration::hours(2)),
+            message_id: None,
         },
     ])
     .await;
@@ -526,4 +660,508 @@ async fn missing_message_returns_not_found() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn server_folders_can_be_listed_and_read() {
+    let app = build_app(build_state(sample_envelopes()).await);
+    let get = |uri: String| app.clone().oneshot(emails_request(&uri));
+
+    let folders = parse_response(
+        get(format!("/api/accounts/{ACCOUNT_ID}/folders"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(folders[0]["kind"], "sent");
+    assert_eq!(folders[1]["kind"], "junk");
+    assert_eq!(folders[1]["name"], "Spam");
+
+    let junk = get(format!("/api/accounts/{ACCOUNT_ID}/folders/junk/emails"))
+        .await
+        .unwrap();
+    assert_eq!(junk.status(), StatusCode::OK);
+    assert_eq!(
+        parse_response(junk).await.as_array().unwrap().len(),
+        sample_envelopes().len()
+    );
+
+    let email = get(format!(
+        "/api/accounts/{ACCOUNT_ID}/folders/junk/emails/100"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(parse_response(email).await["uid"], 100);
+
+    let attachment = get(format!(
+        "/api/accounts/{ACCOUNT_ID}/folders/junk/emails/100/attachments/0"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(attachment.status(), StatusCode::OK);
+    assert!(
+        attachment.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .starts_with("attachment")
+    );
+    assert_eq!(attachment.headers()["content-security-policy"], "sandbox");
+
+    // A folder the server lacks, and one that is not a folder at all.
+    let missing = get(format!("/api/accounts/{ACCOUNT_ID}/folders/trash/emails"))
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    let bogus = get(format!("/api/accounts/{ACCOUNT_ID}/folders/INBOX/emails"))
+        .await
+        .unwrap();
+    assert!(bogus.status().is_client_error());
+}
+
+#[tokio::test]
+async fn server_folders_need_a_connected_account() {
+    let app = build_app(build_state(sample_envelopes()).await);
+    let response = app
+        .oneshot(emails_request(
+            "/api/accounts/someone-else/folders/junk/emails",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests: sending
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sending_goes_through_the_accounts_smtp_server() {
+    let mail = Arc::new(MockMailFetcher::with_envelopes(vec![]));
+    let state = build_state_with(mail.clone()).await;
+    let response = build_app(state)
+        .oneshot(send_request(
+            serde_json::json!({
+                "to": [{ "name": "Sarah Chen", "email": "sarah@acme.example" }],
+                "cc": [{ "name": null, "email": "bob@acme.example" }],
+                "subject": "Hello",
+                "body": "Hi Sarah",
+                "in_reply_to": "<orig@acme.example>",
+            }),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let receipt = parse_response(response).await;
+
+    let sent = mail.sent.lock().unwrap();
+    let (smtp, email) = &sent[0];
+    assert_eq!(smtp.host, "smtp.test.com");
+    assert_eq!(email.from.email, "test@example.com");
+    assert_eq!(email.to[0].name.as_deref(), Some("Sarah Chen"));
+    assert_eq!(email.cc[0].email, "bob@acme.example");
+    assert_eq!(email.in_reply_to.as_deref(), Some("orig@acme.example"));
+    assert_eq!(receipt["message_id"], email.message_id.as_str());
+    assert_eq!(receipt["saved_to_sent"], false);
+}
+
+#[tokio::test]
+async fn sending_explains_what_is_wrong_with_a_message() {
+    let mail = Arc::new(MockMailFetcher::with_envelopes(vec![]));
+    let state = build_state_with(mail.clone()).await;
+    for (body, message) in [
+        (
+            serde_json::json!({ "subject": "No one" }),
+            "Add at least one recipient",
+        ),
+        (
+            serde_json::json!({ "to": [{ "name": null, "email": "not-an-address" }] }),
+            "“not-an-address” is not a valid email address",
+        ),
+    ] {
+        let response = build_app(state.clone())
+            .oneshot(send_request(body, true))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(parse_response(response).await["error"], message);
+    }
+    assert!(mail.sent.lock().unwrap().is_empty());
+}
+
+fn contacts_request(
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+    signed_in: bool,
+) -> Request<Body> {
+    let mut request = Request::builder()
+        .uri(uri)
+        .method(method)
+        .header("Content-Type", "application/json");
+    if signed_in {
+        request = request.header("Cookie", format!("inboxmax_session={SESSION_TOKEN}"));
+    }
+    request
+        .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn the_address_book_fills_from_sent_mail_and_can_be_edited() {
+    let state = build_state_with(Arc::new(MockMailFetcher::with_envelopes(vec![]))).await;
+    let app = || build_app(state.clone());
+    app()
+        .oneshot(send_request(
+            serde_json::json!({
+                "to": [{ "name": "Sarah Chen", "email": "Sarah@acme.example" }],
+                "cc": [{ "name": null, "email": "bob@acme.example" }],
+                "subject": "Hi",
+            }),
+            true,
+        ))
+        .await
+        .unwrap();
+
+    let found = parse_response(
+        app()
+            .oneshot(contacts_request("GET", "/api/contacts?q=chen", None, true))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(found[0]["email"], "sarah@acme.example");
+    assert_eq!(found[0]["name"], "Sarah Chen");
+    assert_eq!(found[0]["times_sent"], 1);
+
+    let renamed = parse_response(
+        app()
+            .oneshot(contacts_request(
+                "POST",
+                "/api/contacts",
+                Some(serde_json::json!({ "email": "sarah@acme.example", "name": "Sarah C." })),
+                true,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(renamed["name"], "Sarah C.");
+
+    let response = app()
+        .oneshot(contacts_request(
+            "DELETE",
+            &format!("/api/contacts/{}", renamed["id"]),
+            None,
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let all = parse_response(
+        app()
+            .oneshot(contacts_request("GET", "/api/contacts", None, true))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let emails: Vec<_> = all
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["email"].clone())
+        .collect();
+    assert_eq!(emails, ["bob@acme.example"]);
+
+    let invalid = app()
+        .oneshot(contacts_request(
+            "POST",
+            "/api/contacts",
+            Some(serde_json::json!({ "email": "nope" })),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn the_address_book_is_private() {
+    let state = build_state_with(Arc::new(MockMailFetcher::with_envelopes(vec![]))).await;
+    for request in [
+        contacts_request("GET", "/api/contacts", None, false),
+        contacts_request("GET", "/api/contacts?q=a", None, false),
+        contacts_request(
+            "POST",
+            "/api/contacts",
+            Some(serde_json::json!({ "email": "a@x.example" })),
+            false,
+        ),
+        contacts_request("DELETE", "/api/contacts/1", None, false),
+    ] {
+        let response = build_app(state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    // Someone else's entry cannot be deleted.
+    sqlx::query(
+        "INSERT INTO users (id, email, password_hash) VALUES ('other', 'o@x.example', '!')",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO contacts (user_id, email) VALUES ('other', 'a@x.example') RETURNING id",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    let response = build_app(state.clone())
+        .oneshot(contacts_request(
+            "DELETE",
+            &format!("/api/contacts/{id}"),
+            None,
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn attachments_download_under_their_names_and_never_render() {
+    let state = build_state(sample_envelopes()).await;
+    let response = build_app(state.clone())
+        .oneshot(emails_request(&format!(
+            "/api/accounts/{ACCOUNT_ID}/emails/100/attachments/0"
+        )))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers().clone();
+    assert_eq!(headers["content-type"], "application/pdf");
+    assert_eq!(
+        headers["content-disposition"],
+        "attachment; filename=\"Gr__e _final_.pdf\"; filename*=UTF-8''Gr%C3%BC%C3%9Fe%20_final_.pdf"
+    );
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    assert_eq!(headers["content-security-policy"], "sandbox");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"%PDF-1.4");
+
+    let missing = build_app(state.clone())
+        .oneshot(emails_request(&format!(
+            "/api/accounts/{ACCOUNT_ID}/emails/100/attachments/9"
+        )))
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    let signed_out = build_app(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/accounts/{ACCOUNT_ID}/emails/100/attachments/0"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(signed_out.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn sends_attachments_larger_than_the_default_request_limit() {
+    use base64::Engine;
+    let mail = Arc::new(MockMailFetcher::with_envelopes(vec![]));
+    let state = build_state_with(mail.clone()).await;
+    // Three megabytes: past axum's default two-megabyte body limit.
+    let data = base64::engine::general_purpose::STANDARD.encode(vec![7u8; 3 * 1024 * 1024]);
+    let response = build_app(state)
+        .oneshot(send_request(
+            serde_json::json!({
+                "to": [{ "name": null, "email": "a@example.com" }],
+                "subject": "Big",
+                "attachments": [{ "filename": "big.bin", "data": data }],
+            }),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let sent = mail.sent.lock().unwrap();
+    assert_eq!(sent[0].1.attachments[0].data.len(), 3 * 1024 * 1024);
+}
+
+#[tokio::test]
+async fn moving_needs_a_mail_client_that_can_and_a_known_folder() {
+    let state = build_state(sample_envelopes()).await;
+    let post = |uri: String, body: Value| {
+        Request::builder()
+            .uri(uri)
+            .method("POST")
+            .header("Content-Type", "application/json")
+            .header("Cookie", format!("inboxmax_session={SESSION_TOKEN}"))
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    // The mock mail client only reads, so it refuses to move.
+    let refused = build_app(state.clone())
+        .oneshot(post(
+            format!("/api/accounts/{ACCOUNT_ID}/emails/100/move"),
+            serde_json::json!({ "to": "trash" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        parse_response(refused).await["error"],
+        "Moving mail is not available"
+    );
+    // Only Trash and the archive are destinations.
+    let unknown = build_app(state.clone())
+        .oneshot(post(
+            format!("/api/accounts/{ACCOUNT_ID}/emails/100/move"),
+            serde_json::json!({ "to": "spam" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let no_id = build_app(state)
+        .oneshot(post(
+            format!("/api/accounts/{ACCOUNT_ID}/restore"),
+            serde_json::json!({ "from": "trash", "message_id": "  " }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(no_id.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn drafts_are_saved_listed_and_removed_per_mailbox() {
+    let state = build_state(sample_envelopes()).await;
+    let id = "44444444-4444-4444-8444-444444444444";
+    let uri = format!("/api/accounts/{ACCOUNT_ID}/drafts/{id}");
+    let request = |method: &str, uri: &str, body: Option<Value>| {
+        Request::builder()
+            .uri(uri)
+            .method(method)
+            .header("Content-Type", "application/json")
+            .header("Cookie", format!("inboxmax_session={SESSION_TOKEN}"))
+            .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
+            .unwrap()
+    };
+    // Bigger than the default request limit: drafts hold their attachments.
+    let big = "x".repeat(3 * 1024 * 1024);
+    let saved = build_app(state.clone())
+        .oneshot(request(
+            "PUT",
+            &uri,
+            Some(serde_json::json!({ "content": { "subject": "Plans", "to": [], "body": big } })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+    assert_eq!(parse_response(saved).await["subject"], "Plans");
+
+    let listed = parse_response(
+        build_app(state.clone())
+            .oneshot(request(
+                "GET",
+                &format!("/api/accounts/{ACCOUNT_ID}/drafts"),
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(listed[0]["id"], id);
+
+    let draft = parse_response(
+        build_app(state.clone())
+            .oneshot(request("GET", &uri, None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(draft["content"]["body"].as_str().unwrap().len(), big.len());
+
+    let deleted = build_app(state.clone())
+        .oneshot(request("DELETE", &uri, None))
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::OK);
+    let gone = build_app(state)
+        .oneshot(request("GET", &uri, None))
+        .await
+        .unwrap();
+    assert_eq!(gone.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn sending_requires_a_signed_in_session() {
+    let mail = Arc::new(MockMailFetcher::with_envelopes(vec![]));
+    let state = build_state_with(mail.clone()).await;
+    let response = build_app(state)
+        .oneshot(send_request(
+            serde_json::json!({ "to": [{ "name": null, "email": "a@example.com" }] }),
+            false,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(mail.sent.lock().unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests: signature
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_mailbox_signature_can_be_saved_and_read_back() {
+    let app = build_app(build_state(vec![]).await);
+    let uri = format!("/api/accounts/{ACCOUNT_ID}/signature");
+
+    let empty = app.clone().oneshot(emails_request(&uri)).await.unwrap();
+    assert_eq!(parse_response(empty).await["signature"], "");
+
+    let saved = app
+        .clone()
+        .oneshot(contacts_request(
+            "PUT",
+            &uri,
+            Some(serde_json::json!({ "signature": "Tess\r\nTest Team\n\n" })),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+    assert_eq!(parse_response(saved).await["signature"], "Tess\nTest Team");
+
+    let read = app.clone().oneshot(emails_request(&uri)).await.unwrap();
+    assert_eq!(parse_response(read).await["signature"], "Tess\nTest Team");
+
+    let too_long = app
+        .clone()
+        .oneshot(contacts_request(
+            "PUT",
+            &uri,
+            Some(serde_json::json!({ "signature": "x".repeat(2001) })),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(too_long.status(), StatusCode::BAD_REQUEST);
+
+    let signed_out = app
+        .oneshot(contacts_request(
+            "PUT",
+            &uri,
+            Some(serde_json::json!({ "signature": "Mallory" })),
+            false,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(signed_out.status(), StatusCode::UNAUTHORIZED);
 }

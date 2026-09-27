@@ -1,5 +1,6 @@
 import { formatTime } from '../utils/dates';
 import { senderColor, senderInitial, senderName } from '../utils/senders';
+import { ArchiveIcon, TrashIcon } from './icons';
 
 // Each state styles the whole row: its band, its text, and its avatar.
 const ROW_STATES = {
@@ -44,9 +45,10 @@ const REVEAL_ON_HOVER = 'md:opacity-0 md:group-hover:opacity-100 md:group-focus-
 
 /**
  * One inbox header. Unseen rows are plain, the last-seen marker row is
- * highlighted, and rows older than it are a greyed-out band.
+ * highlighted, and rows older than it are a greyed-out band. `onMove(email,
+ * 'archive' | 'trash')` offers Archive and Delete.
  */
-export default function EmailRow({ email, onClick, isRemembered, onToggleRemember, isSeen, isWatermark, onSetWatermark }) {
+export default function EmailRow({ email, onClick, isRemembered, onToggleRemember, isSeen, isWatermark, onSetWatermark, onMove }) {
   const state = ROW_STATES[isWatermark ? 'watermark' : isSeen ? 'seen' : 'unseen'];
   const subject = email.subject || '(no subject)';
   // Amber would vanish on the marker highlight, so a saved star goes white there.
@@ -82,6 +84,28 @@ export default function EmailRow({ email, onClick, isRemembered, onToggleRemembe
       </button>
 
       <div className="flex items-center shrink-0">
+        {onMove && (
+          <>
+            <button
+              type="button"
+              onClick={() => onMove(email, 'archive')}
+              className={`${ACTION_BUTTON} ${state.ring} ${state.icon} hover:text-ink ${REVEAL_ON_HOVER}`}
+              title="Archive"
+              aria-label={`Archive “${subject}”`}
+            >
+              <ArchiveIcon />
+            </button>
+            <button
+              type="button"
+              onClick={() => onMove(email, 'trash')}
+              className={`${ACTION_BUTTON} ${state.ring} ${state.icon} hover:text-danger-ink ${REVEAL_ON_HOVER}`}
+              title="Delete"
+              aria-label={`Delete “${subject}”`}
+            >
+              <TrashIcon />
+            </button>
+          </>
+        )}
         <button
           type="button"
           onClick={() => onToggleRemember(email)}

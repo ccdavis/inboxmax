@@ -41,5 +41,6 @@ dotenvy = "0.15"
 
 [dev-dependencies]
 async-trait.workspace = true
+base64 = "0.22"
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }

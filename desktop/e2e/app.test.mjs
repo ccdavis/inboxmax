@@ -8,7 +8,10 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Session, startDriver } from './webdriver.mjs';
 
-const APP = resolve(import.meta.dirname, '../../target/debug/inboxmax-desktop');
+const APP = resolve(
+  import.meta.dirname,
+  `../../target/debug/inboxmax-desktop${process.platform === 'win32' ? '.exe' : ''}`,
+);
 const SCREENSHOTS = process.env.SCREENSHOT_DIR;
 // Saved passwords need an unlocked OS keychain; CI runs without one.
 const KEYCHAIN = process.env.INBOXMAX_TEST_KEYCHAIN === '1';
@@ -93,8 +96,8 @@ describe('Inbox Max desktop', () => {
         await session.find('h1', { text: 'Reconnect your mailbox' });
         await connect(session, 'me@work.example');
       }
-      // Only mail since the last visit is shown, and the demo mailbox has none.
-      await session.find('main h2', { text: 'No new emails' });
+      // A later visit still shows the mail from around the last one.
+      await session.find('main li', { text: 'GitHub (work.example)' });
       await session.find('header', { text: 'me@work.example' });
 
       await (await session.find('aside button', { text: '+ Add mailbox' })).click();
@@ -104,7 +107,7 @@ describe('Inbox Max desktop', () => {
 
       await (await session.find('aside li button', { text: 'me@work.example' })).click();
       await session.find('header', { text: 'me@work.example' });
-      await session.find('main h2', { text: 'No new emails' });
+      await session.find('main li', { text: 'GitHub (work.example)' });
       const current = await session.find('aside button[aria-current="true"]');
       assert.match(await current.text(), /me@work\.example/);
       await saveScreenshot(session, 'desktop-two-mailboxes');

@@ -36,15 +36,19 @@ async function mockApi(page, { searchResults = [] } = {}) {
       return json({
         uid: 300,
         subject: 'Formatted',
-        from: 'Sender 0',
-        to: 'me@example.com',
+        from: [{ name: 'Sender 0', email: 'sender0@example.com' }],
+        reply_to: [],
+        to: [{ name: null, email: 'me@example.com' }],
+        cc: [],
         date: ago(HOUR),
+        received: ago(HOUR),
         body_html: '<h1>Heading</h1><p>Read the <a href="https://example.com">docs</a>.</p><ul><li>One</li></ul>',
         body_text: null,
       });
     }
     if (path === '/api/accounts/acct/search') return json(searchResults);
     if (path === '/api/accounts/acct/remembered') return json([]);
+    if (path === '/api/accounts/acct/drafts') return json([]);
     return json({ ok: true });
   });
 }
@@ -90,7 +94,7 @@ test('seen rows are greyed out in both light and dark mode', async ({ browser })
     const context = await browser.newContext({ colorScheme });
     const page = await context.newPage();
     await openInbox(page);
-    const [unseen, seen] = await Promise.all(
+    const styles = () => Promise.all(
       [`[data-uid="${WATERMARK + 1}"]`, `[data-uid="${WATERMARK - 1}"]`].map((selector) =>
         page.locator(selector).evaluate((row) => ({
           background: getComputedStyle(row).backgroundColor,
@@ -98,8 +102,11 @@ test('seen rows are greyed out in both light and dark mode', async ({ browser })
         })),
       ),
     );
-    expect(seen.background, colorScheme).not.toBe(unseen.background);
-    expect(seen.text, colorScheme).not.toBe(unseen.text);
+    // Rows fade between states, so read the colors once they settle.
+    await expect.poll(async () => {
+      const [unseen, seen] = await styles();
+      return seen.background !== unseen.background && seen.text !== unseen.text;
+    }, { message: colorScheme }).toBe(true);
     await context.close();
   }
 });

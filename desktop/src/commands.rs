@@ -2,13 +2,19 @@
 //! Each one is a thin wrapper over the shared core operations, and returns
 //! the same JSON shapes so the frontend can use either transport.
 
+use crate::downloads;
 use crate::state::{DesktopState, LOCAL_USER_ID};
 use inboxmax_core::account::{self, AccountStatus, ConnectRequest, ConnectResponse};
+use inboxmax_core::contacts::{self, Contact, ContactRequest};
+use inboxmax_core::drafts::{self, Draft, DraftSummary};
 use inboxmax_core::fake_mail::{self, DEMO_EMAIL, DEMO_HOST, DEMO_PASSWORD};
-use inboxmax_core::imap_client::{EmailEnvelope, FullEmail};
-use inboxmax_core::mailbox::{self, EmailListResponse, RememberRequest, RememberedEmail};
+use inboxmax_core::imap_client::{EmailEnvelope, Folder, FolderInfo, FullEmail};
+use inboxmax_core::mailbox::{self, EmailListResponse, RememberRequest, RememberedEmail, Restored};
+use inboxmax_core::outgoing::{SendReceipt, SendRequest};
+use inboxmax_core::signature::{self, Signature};
 use inboxmax_core::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 use tauri::State;
 use tauri_plugin_opener::OpenerExt;
 
@@ -21,10 +27,9 @@ pub struct AppInfo {
 
 #[derive(Deserialize)]
 pub struct ConnectArgs {
-    pub email: String,
-    pub password: String,
-    pub imap_host: Option<String>,
-    pub imap_port: Option<u16>,
+    /// The same fields as the web API's connect request.
+    #[serde(flatten)]
+    pub connection: ConnectRequest,
     /// Save the password in the OS credential store.
     #[serde(default = "default_true")]
     pub remember: bool,
@@ -63,10 +68,12 @@ pub async fn connect_demo(state: State<'_, DesktopState>) -> AppResult<ConnectRe
     let response = connect(
         &state,
         ConnectArgs {
-            email: DEMO_EMAIL.into(),
-            password: DEMO_PASSWORD.into(),
-            imap_host: Some(DEMO_HOST.into()),
-            imap_port: None,
+            connection: ConnectRequest {
+                email: DEMO_EMAIL.into(),
+                password: DEMO_PASSWORD.into(),
+                imap_host: Some(DEMO_HOST.into()),
+                ..ConnectRequest::default()
+            },
             remember: false,
         },
     )
@@ -76,17 +83,11 @@ pub async fn connect_demo(state: State<'_, DesktopState>) -> AppResult<ConnectRe
 }
 
 async fn connect(state: &DesktopState, request: ConnectArgs) -> AppResult<ConnectResponse> {
-    let remember = request.remember;
     let outcome = account::connect_account(
         &state.db,
         state.mail.as_ref(),
         LOCAL_USER_ID,
-        ConnectRequest {
-            email: request.email,
-            password: request.password,
-            imap_host: request.imap_host,
-            imap_port: request.imap_port,
-        },
+        request.connection,
     )
     .await?;
     let status = AccountStatus {
@@ -95,7 +96,7 @@ async fn connect(state: &DesktopState, request: ConnectArgs) -> AppResult<Connec
         connected: true,
         password_saved: false,
     };
-    let password_saved = state.add_connected(outcome.account, remember).await;
+    let password_saved = state.add_connected(outcome.account, request.remember).await;
     Ok(ConnectResponse {
         account: AccountStatus {
             password_saved,
@@ -127,7 +128,7 @@ pub async fn get_email(
     uid: i64,
 ) -> AppResult<FullEmail> {
     let account = state.require_account(&account_id).await?;
-    mailbox::get_email(state.mail.as_ref(), &account, uid).await
+    mailbox::get_email(&state.db, state.mail.as_ref(), LOCAL_USER_ID, &account, uid).await
 }
 
 #[tauri::command]
@@ -138,6 +139,245 @@ pub async fn search_emails(
 ) -> AppResult<Vec<EmailEnvelope>> {
     let account = state.require_account(&account_id).await?;
     mailbox::search(state.mail.as_ref(), &account, &query).await
+}
+
+#[tauri::command]
+pub async fn send_email(
+    state: State<'_, DesktopState>,
+    account_id: String,
+    request: SendRequest,
+) -> AppResult<SendReceipt> {
+    let account = state.require_account(&account_id).await?;
+    mailbox::send(
+        &state.db,
+        state.mail.as_ref(),
+        LOCAL_USER_ID,
+        &account,
+        request,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn list_folders(
+    state: State<'_, DesktopState>,
+    account_id: String,
+) -> AppResult<Vec<FolderInfo>> {
+    let account = state.require_account(&account_id).await?;
+    mailbox::list_folders(state.mail.as_ref(), &account).await
+}
+
+#[tauri::command]
+pub async fn list_folder_emails(
+    state: State<'_, DesktopState>,
+    account_id: String,
+    folder: Folder,
+) -> AppResult<Vec<EmailEnvelope>> {
+    let account = state.require_account(&account_id).await?;
+    mailbox::folder_emails(state.mail.as_ref(), &account, folder).await
+}
+
+#[tauri::command]
+pub async fn get_folder_email(
+    state: State<'_, DesktopState>,
+    account_id: String,
+    folder: Folder,
+    uid: i64,
+) -> AppResult<FullEmail> {
+    let account = state.require_account(&account_id).await?;
+    mailbox::get_folder_email(state.mail.as_ref(), &account, folder, uid).await
+}
+
+#[tauri::command]
+pub async fn get_signature(
+    state: State<'_, DesktopState>,
+    account_id: String,
+) -> AppResult<Signature> {
+    let account = state.require_account(&account_id).await?;
+    signature::get(&state.db, &account.id).await
+}
+
+#[tauri::command]
+pub async fn set_signature(
+    state: State<'_, DesktopState>,
+    account_id: String,
+    signature: String,
+) -> AppResult<Signature> {
+    let account = state.require_account(&account_id).await?;
+    signature::set(&state.db, &account.id, &signature).await
+}
+
+#[tauri::command]
+pub async fn list_drafts(
+    state: State<'_, DesktopState>,
+    account_id: String,
+) -> AppResult<Vec<DraftSummary>> {
+    let account = state.require_account(&account_id).await?;
+    drafts::list(&state.db, &account.id).await
+}
+
+#[tauri::command]
+pub async fn get_draft(
+    state: State<'_, DesktopState>,
+    account_id: String,
+    draft_id: String,
+) -> AppResult<Draft> {
+    let account = state.require_account(&account_id).await?;
+    drafts::get(&state.db, &account.id, &draft_id).await
+}
+
+#[tauri::command]
+pub async fn save_draft(
+    state: State<'_, DesktopState>,
+    account_id: String,
+    draft_id: String,
+    content: serde_json::Value,
+) -> AppResult<DraftSummary> {
+    let account = state.require_account(&account_id).await?;
+    drafts::save(&state.db, &account.id, &draft_id, &content).await
+}
+
+#[tauri::command]
+pub async fn delete_draft(
+    state: State<'_, DesktopState>,
+    account_id: String,
+    draft_id: String,
+) -> AppResult<()> {
+    let account = state.require_account(&account_id).await?;
+    drafts::delete(&state.db, &account.id, &draft_id).await
+}
+
+/// Move a message to Trash or the archive.
+#[tauri::command]
+pub async fn move_email(
+    state: State<'_, DesktopState>,
+    account_id: String,
+    uid: i64,
+    to: Folder,
+) -> AppResult<()> {
+    let account = state.require_account(&account_id).await?;
+    mailbox::move_email(&state.db, state.mail.as_ref(), &account, uid, to).await
+}
+
+/// Undo a move.
+#[tauri::command]
+pub async fn restore_email(
+    state: State<'_, DesktopState>,
+    account_id: String,
+    from: Folder,
+    message_id: String,
+) -> AppResult<Restored> {
+    let account = state.require_account(&account_id).await?;
+    let restored = mailbox::restore_email(state.mail.as_ref(), &account, from, &message_id).await?;
+    state
+        .restored
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(message_id, std::time::Instant::now());
+    Ok(restored)
+}
+
+#[derive(Serialize)]
+pub struct SavedFile {
+    pub path: String,
+    /// The name it was saved under, which may have a number added.
+    pub filename: String,
+}
+
+/// The Downloads folder, or INBOXMAX_DOWNLOAD_DIR (for tests).
+fn download_dir(app: &tauri::AppHandle) -> AppResult<std::path::PathBuf> {
+    if let Some(dir) = crate::test_setting("INBOXMAX_DOWNLOAD_DIR") {
+        return Ok(dir.into());
+    }
+    app.path()
+        .download_dir()
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("There is no Downloads folder: {e}")))
+}
+
+/// Save an attachment in the Downloads folder, never over an existing file.
+#[tauri::command]
+pub async fn save_attachment(
+    app: tauri::AppHandle,
+    state: State<'_, DesktopState>,
+    account_id: String,
+    uid: i64,
+    index: usize,
+) -> AppResult<SavedFile> {
+    let account = state.require_account(&account_id).await?;
+    let attachment = mailbox::get_attachment(state.mail.as_ref(), &account, uid, index).await?;
+    save_to_downloads(&app, attachment).await
+}
+
+/// Save an attachment from a message in one of the server's folders.
+#[tauri::command]
+pub async fn save_folder_attachment(
+    app: tauri::AppHandle,
+    state: State<'_, DesktopState>,
+    account_id: String,
+    folder: Folder,
+    uid: i64,
+    index: usize,
+) -> AppResult<SavedFile> {
+    let account = state.require_account(&account_id).await?;
+    let attachment =
+        mailbox::get_folder_attachment(state.mail.as_ref(), &account, folder, uid, index).await?;
+    save_to_downloads(&app, attachment).await
+}
+
+async fn save_to_downloads(
+    app: &tauri::AppHandle,
+    attachment: inboxmax_core::attachment::Attachment,
+) -> AppResult<SavedFile> {
+    let path =
+        downloads::save_new(&download_dir(app)?, &attachment.filename, &attachment.data).await?;
+    Ok(SavedFile {
+        filename: path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        path: path.display().to_string(),
+    })
+}
+
+/// Show a saved attachment in the file manager. Only files in Downloads.
+/// Async, so the checks never hold up the window.
+#[tauri::command]
+pub async fn show_in_folder(app: tauri::AppHandle, path: String) -> AppResult<()> {
+    let path = std::path::PathBuf::from(path);
+    if !downloads::is_inside(&download_dir(&app)?, &path) {
+        return Err(AppError::BadRequest(
+            "Only saved attachments can be shown".into(),
+        ));
+    }
+    app.opener()
+        .reveal_item_in_dir(&path)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Could not show the file: {e}")))
+}
+
+/// The address book, or with a query, suggestions whose address or name
+/// starts with it.
+#[tauri::command]
+pub async fn list_contacts(
+    state: State<'_, DesktopState>,
+    query: Option<String>,
+) -> AppResult<Vec<Contact>> {
+    match query {
+        Some(query) => contacts::search(&state.db, LOCAL_USER_ID, &query).await,
+        None => contacts::list(&state.db, LOCAL_USER_ID).await,
+    }
+}
+
+#[tauri::command]
+pub async fn save_contact(
+    state: State<'_, DesktopState>,
+    request: ContactRequest,
+) -> AppResult<Contact> {
+    contacts::save(&state.db, LOCAL_USER_ID, request).await
+}
+
+#[tauri::command]
+pub async fn delete_contact(state: State<'_, DesktopState>, id: i64) -> AppResult<()> {
+    contacts::delete(&state.db, LOCAL_USER_ID, id).await
 }
 
 #[tauri::command]

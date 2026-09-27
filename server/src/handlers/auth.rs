@@ -300,6 +300,17 @@ pub async fn require_account(
         .ok_or(AppError::Unauthorized)
 }
 
+/// The signed-in user and one of the mailboxes connected in this session.
+pub async fn require_user_and_account(
+    state: &AppState,
+    jar: &CookieJar,
+    account_id: &str,
+) -> AppResult<(UserSession, ConnectedAccount)> {
+    let user = require_user(state, jar).await?;
+    let account = require_account(state, jar, account_id).await?;
+    Ok((user, account))
+}
+
 // ---------- Utility ----------
 
 fn max_age_30_days() -> time::Duration {

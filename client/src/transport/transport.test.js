@@ -20,12 +20,31 @@ describe('http transport', () => {
     await http.setWatermark('a1', 9);
     await http.forgetEmail('a1', 9);
 
+    await http.sendEmail('a1', { to: [] });
+    await http.searchContacts('o\'brien & co');
+    await http.listContacts();
+    await http.saveContact({ email: 's@x', name: 'S' });
+    await http.deleteContact(7);
+    await http.moveEmail('a1', 12, 'trash');
+    await http.restoreEmail('a1', 'trash', 'id@x');
+    await http.saveDraft('a1', 'd1', { body: 'x' });
+    await http.deleteDraft('a1', 'd1');
+
     const calls = fetch.mock.calls.map(([url, init]) => [init.method ?? 'GET', url]);
     expect(calls).toEqual([
       ['GET', '/api/accounts/a%2F1/emails?since=123'],
       ['GET', '/api/accounts/a1/search?q=caf%C3%A9%20%26%20co'],
       ['PUT', '/api/accounts/a1/watermark'],
       ['DELETE', '/api/accounts/a1/remembered/9'],
+      ['POST', '/api/accounts/a1/send'],
+      ['GET', '/api/contacts?q=o\'brien%20%26%20co'],
+      ['GET', '/api/contacts'],
+      ['POST', '/api/contacts'],
+      ['DELETE', '/api/contacts/7'],
+      ['POST', '/api/accounts/a1/emails/12/move'],
+      ['POST', '/api/accounts/a1/restore'],
+      ['PUT', '/api/accounts/a1/drafts/d1'],
+      ['DELETE', '/api/accounts/a1/drafts/d1'],
     ]);
   });
 
@@ -46,12 +65,36 @@ describe('tauri transport', () => {
     await tauri.rememberEmail('a1', 5, { subject: 'S' });
     await tauri.connectAccount({ email: 'a@example.com', password: 'pw', remember: false });
     await tauri.connectDemo();
+    await tauri.sendEmail('a1', { to: [] });
+    await tauri.searchContacts('sar');
+    await tauri.listContacts();
+    await tauri.saveContact({ email: 's@x', name: 'S' });
+    await tauri.deleteContact(7);
+    await tauri.downloadAttachment('a1', 12, 0);
+    await tauri.showInFolder('C:\\Downloads\\x.pdf');
+    await tauri.moveEmail('a1', 12, 'trash');
+    await tauri.restoreEmail('a1', 'trash', 'id@x');
+    await tauri.listDrafts('a1');
+    await tauri.saveDraft('a1', 'd1', { body: 'x' });
+    await tauri.deleteDraft('a1', 'd1');
 
     expect(invoke.mock.calls).toEqual([
       ['list_emails', { accountId: 'a1', since: null }],
       ['remember_email', { accountId: 'a1', uid: 5, data: { subject: 'S' } }],
       ['connect_account', { request: { email: 'a@example.com', password: 'pw', remember: false } }],
       ['connect_demo', undefined],
+      ['send_email', { accountId: 'a1', request: { to: [] } }],
+      ['list_contacts', { query: 'sar' }],
+      ['list_contacts', { query: null }],
+      ['save_contact', { request: { email: 's@x', name: 'S' } }],
+      ['delete_contact', { id: 7 }],
+      ['save_attachment', { accountId: 'a1', uid: 12, index: 0 }],
+      ['show_in_folder', { path: 'C:\\Downloads\\x.pdf' }],
+      ['move_email', { accountId: 'a1', uid: 12, to: 'trash' }],
+      ['restore_email', { accountId: 'a1', from: 'trash', messageId: 'id@x' }],
+      ['list_drafts', { accountId: 'a1' }],
+      ['save_draft', { accountId: 'a1', draftId: 'd1', content: { body: 'x' } }],
+      ['delete_draft', { accountId: 'a1', draftId: 'd1' }],
     ]);
   });
 

@@ -1,0 +1,3 @@
+# sqlx checksums migrations byte for byte, so they must have the same line
+# endings in every checkout (see accept_either_line_ending in crates/core/src/db.rs).
+crates/core/migrations/*.sql text eol=lf

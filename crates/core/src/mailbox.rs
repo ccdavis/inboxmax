@@ -3,13 +3,18 @@
 //! The web and desktop front ends expose these unchanged.
 
 use crate::account::ConnectedAccount;
+use crate::attachment::Attachment;
 use crate::error::{AppError, AppResult};
-use crate::imap_client::{EmailEnvelope, FullEmail, MailFetcher};
+use crate::imap_client::{EmailEnvelope, Folder, FolderInfo, FullEmail, MailAddress, MailFetcher};
+use crate::outgoing::{OutgoingEmail, SendReceipt, SendRequest};
+use crate::{contacts, drafts};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+/// More than any real message carries.
+const MAX_FORWARDED_ATTACHMENTS: usize = 100;
 
 #[derive(Debug, Serialize)]
 pub struct EmailListResponse {
@@ -162,13 +167,133 @@ pub async fn list_emails(
     })
 }
 
+/// Open a message. Its sender (and Reply-To) join `user_id`'s address book.
 pub async fn get_email(
+    db: &SqlitePool,
     mail: &dyn MailFetcher,
+    user_id: &str,
     account: &ConnectedAccount,
     uid: i64,
 ) -> AppResult<FullEmail> {
     let uid = validate_uid(uid)?;
-    mail.fetch_email(&account.mail_credentials(), uid).await
+    let email = mail.fetch_email(&account.mail_credentials(), uid).await?;
+    let people: Vec<_> = email.from.iter().chain(&email.reply_to).cloned().collect();
+    // The address book is a convenience; reading must not fail because of it.
+    if let Err(e) = contacts::record_seen(db, user_id, &people, &[&account.email]).await {
+        tracing::warn!("Could not update the address book: {e}");
+    }
+    Ok(email)
+}
+
+/// Where a restored message now is.
+#[derive(Debug, Serialize)]
+pub struct Restored {
+    pub uid: u32,
+}
+
+/// Move a message out of the inbox, into Trash or the archive. Its
+/// remembered entry goes too, since its UID no longer names it.
+pub async fn move_email(
+    db: &SqlitePool,
+    mail: &dyn MailFetcher,
+    account: &ConnectedAccount,
+    uid: i64,
+    to: Folder,
+) -> AppResult<()> {
+    let checked = validate_uid(uid)?;
+    if !to.accepts_moves() {
+        return Err(AppError::BadRequest(format!(
+            "Mail cannot be moved to {}",
+            to.label()
+        )));
+    }
+    mail.move_message(&account.mail_credentials(), checked, to)
+        .await?;
+    if let Err(e) = forget(db, &account.id, uid).await {
+        tracing::warn!("Could not forget a moved message: {e}");
+    }
+    Ok(())
+}
+
+/// Undo a move: bring the message with this Message-ID back to the inbox.
+pub async fn restore_email(
+    mail: &dyn MailFetcher,
+    account: &ConnectedAccount,
+    from: Folder,
+    message_id: &str,
+) -> AppResult<Restored> {
+    if matches!(from, Folder::Sent | Folder::Drafts) {
+        return Err(AppError::BadRequest(format!(
+            "Mail in {} cannot be moved to the inbox",
+            from.label()
+        )));
+    }
+    let message_id = message_id
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>');
+    if message_id.is_empty() {
+        return Err(AppError::BadRequest(
+            "This message cannot be found again to restore it".into(),
+        ));
+    }
+    let uid = mail
+        .restore_message(&account.mail_credentials(), from, message_id)
+        .await?;
+    Ok(Restored { uid })
+}
+
+/// The server folders the mailbox has, besides the inbox.
+pub async fn list_folders(
+    mail: &dyn MailFetcher,
+    account: &ConnectedAccount,
+) -> AppResult<Vec<FolderInfo>> {
+    mail.list_folders(&account.mail_credentials()).await
+}
+
+/// The newest messages in a server folder.
+pub async fn folder_emails(
+    mail: &dyn MailFetcher,
+    account: &ConnectedAccount,
+    folder: Folder,
+) -> AppResult<Vec<EmailEnvelope>> {
+    mail.fetch_folder(&account.mail_credentials(), folder).await
+}
+
+/// A message in a server folder, left unread on the server.
+pub async fn get_folder_email(
+    mail: &dyn MailFetcher,
+    account: &ConnectedAccount,
+    folder: Folder,
+    uid: i64,
+) -> AppResult<FullEmail> {
+    let uid = validate_uid(uid)?;
+    mail.fetch_folder_email(&account.mail_credentials(), folder, uid)
+        .await
+}
+
+pub async fn get_folder_attachment(
+    mail: &dyn MailFetcher,
+    account: &ConnectedAccount,
+    folder: Folder,
+    uid: i64,
+    index: usize,
+) -> AppResult<Attachment> {
+    let uid = validate_uid(uid)?;
+    mail.fetch_folder_attachment(&account.mail_credentials(), folder, uid, index)
+        .await
+}
+
+/// One attachment of a message, by its position among the attachments.
+pub async fn get_attachment(
+    mail: &dyn MailFetcher,
+    account: &ConnectedAccount,
+    uid: i64,
+    index: usize,
+) -> AppResult<Attachment> {
+    let uid = validate_uid(uid)?;
+    mail.fetch_attachment(&account.mail_credentials(), uid, index)
+        .await
 }
 
 /// Record `uid` as the last-seen email and the visit time.
@@ -181,6 +306,59 @@ pub async fn set_watermark(db: &SqlitePool, account: &ConnectedAccount, uid: i64
         .execute(db)
         .await?;
     Ok(())
+}
+
+/// Send a message from the account and file a copy in its Sent folder. The
+/// recipients join `user_id`'s address book.
+pub async fn send(
+    db: &SqlitePool,
+    mail: &dyn MailFetcher,
+    user_id: &str,
+    account: &ConnectedAccount,
+    request: SendRequest,
+) -> AppResult<SendReceipt> {
+    let forward = request.forward.clone();
+    let draft_id = request.draft_id.clone();
+    let mut email = OutgoingEmail::new(MailAddress::new(None, &account.email), request)?;
+    // A forward's attachments come straight from the original message.
+    if let Some(forward) = forward {
+        let uid = validate_uid(forward.uid)?;
+        // Each attachment once, a bounded number of them, and the size
+        // checked as each arrives, so no request can pile up downloads.
+        let mut indexes = forward.indexes;
+        indexes.sort_unstable();
+        indexes.dedup();
+        if indexes.len() > MAX_FORWARDED_ATTACHMENTS {
+            return Err(AppError::BadRequest(format!(
+                "A message can forward at most {MAX_FORWARDED_ATTACHMENTS} attachments"
+            )));
+        }
+        let credentials = account.mail_credentials();
+        for index in indexes {
+            let original = match forward.folder {
+                Some(folder) => {
+                    mail.fetch_folder_attachment(&credentials, folder, uid, index)
+                        .await?
+                }
+                None => mail.fetch_attachment(&credentials, uid, index).await?,
+            };
+            email.attach(vec![original])?;
+        }
+    }
+    let receipt = mail
+        .send(&account.mail_credentials(), &account.smtp, &email)
+        .await?;
+    let recipients: Vec<_> = email.recipients().cloned().collect();
+    // Sent is sent: a failed address-book update must not look like a failed send.
+    if let Err(e) = contacts::record_sent(db, user_id, &recipients).await {
+        tracing::warn!("Could not update the address book: {e}");
+    }
+    if let Some(draft_id) = draft_id
+        && let Err(e) = drafts::delete(db, &account.id, &draft_id).await
+    {
+        tracing::warn!("Could not remove the sent message's draft: {e}");
+    }
+    Ok(receipt)
 }
 
 /// Search subjects and senders; returns the newest 50 matches.

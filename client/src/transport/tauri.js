@@ -1,6 +1,7 @@
 // Desktop transport: Tauri IPC commands in the Inbox Max desktop app.
 // Commands mirror the HTTP API and return the same JSON shapes.
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { ApiError } from '../apiError';
 
 async function call(command, args) {
@@ -35,10 +36,40 @@ export const transport = {
   getEmail: (accountId, uid) => call('get_email', { accountId, uid }),
   searchEmails: (accountId, query) => call('search_emails', { accountId, query }),
   setWatermark: (accountId, uid) => call('set_watermark', { accountId, uid }),
+  sendEmail: (accountId, request) => call('send_email', { accountId, request }),
+  listDrafts: (accountId) => call('list_drafts', { accountId }),
+  getDraft: (accountId, draftId) => call('get_draft', { accountId, draftId }),
+  saveDraft: (accountId, draftId, content) => call('save_draft', { accountId, draftId, content }),
+  deleteDraft: (accountId, draftId) => call('delete_draft', { accountId, draftId }),
+  getSignature: (accountId) => call('get_signature', { accountId }),
+  setSignature: (accountId, signature) => call('set_signature', { accountId, signature }),
+  listFolders: (accountId) => call('list_folders', { accountId }),
+  getFolderEmails: (accountId, folder) => call('list_folder_emails', { accountId, folder }),
+  getFolderEmail: (accountId, folder, uid) => call('get_folder_email', { accountId, folder, uid }),
+  moveEmail: (accountId, uid, to) => call('move_email', { accountId, uid, to }),
+  restoreEmail: (accountId, from, messageId) => call('restore_email', { accountId, from, messageId }),
 
   getRemembered: (accountId) => call('list_remembered', { accountId }),
   rememberEmail: (accountId, uid, data) => call('remember_email', { accountId, uid, data }),
   forgetEmail: (accountId, uid) => call('forget_email', { accountId, uid }),
 
+  searchContacts: (query) => call('list_contacts', { query }),
+  listContacts: () => call('list_contacts', { query: null }),
+  saveContact: (request) => call('save_contact', { request }),
+  deleteContact: (id) => call('delete_contact', { id }),
+
+  downloadAttachment: (accountId, uid, index) => call('save_attachment', { accountId, uid, index }),
+  downloadFolderAttachment: (accountId, folder, uid, index) =>
+    call('save_folder_attachment', { accountId, folder, uid, index }),
+  showInFolder: (path) => call('show_in_folder', { path }),
+
   openExternal: (url) => call('open_external', { url }),
+
+  // The app checks for new mail even while its window is hidden.
+  onNewMail: (callback) => {
+    const stop = listen('new-mail', (event) => callback(event.payload.account_id));
+    return () => {
+      stop.then((unlisten) => unlisten()).catch(() => {});
+    };
+  },
 };

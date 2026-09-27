@@ -74,6 +74,16 @@ npm run build:test     # debug build with the demo mailbox
 npm run test:e2e
 ```
 
+On Windows they also need Microsoft Edge WebDriver at the same version as the
+WebView2 runtime (Settings > Apps shows "Microsoft Edge WebView2 Runtime"):
+
+```bash
+winget install Microsoft.EdgeDriver --version <WebView2 version>
+```
+
+WebView2 updates itself, so update the driver when the tests report a version
+mismatch.
+
 On Linux the end-to-end tests also need `webkit2gtk-driver` and a display; headless:
 
 ```bash
@@ -108,4 +118,5 @@ dbus-run-session -- bash -c '/usr/libexec/at-spi-bus-launcher --launch-immediate
 | `INBOXMAX_FAKE_MAIL=1` | Use the generated demo mailbox (requires a `--features fake-mail` build) |
 | `INBOXMAX_DATA_DIR` | Store the database here instead of the app data directory |
 | `INBOXMAX_NO_KEYCHAIN=1` | Never use the OS keychain; passwords last until quit |
+| `INBOXMAX_DOWNLOAD_DIR` | Save attachments here instead of the Downloads folder (used by tests) |
 | `RUST_LOG` | Log filter, e.g. `inboxmax_core=debug` |

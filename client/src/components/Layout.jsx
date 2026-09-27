@@ -17,10 +17,45 @@ function useIsMobile() {
 }
 
 /**
+ * A message across the top of the page. The live-region role is on the text
+ * alone, so assistive technology announces the message, not the ✕.
+ */
+function Banner({ role, onDismiss, action, className, children }) {
+  return (
+    <div className={`flex items-start justify-between gap-3 text-sm px-4 py-2 border-b ${className}`}>
+      <span role={role}>{children}</span>
+      {action && (
+        <button
+          onClick={action.onClick}
+          className="ml-auto shrink-0 rounded px-2 font-medium text-accent hover:text-accent-hover underline-offset-2 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+        >
+          {action.label}
+        </button>
+      )}
+      {onDismiss && (
+        <button
+          onClick={onDismiss}
+          className="shrink-0 rounded px-1 hover:opacity-70 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+          aria-label="Dismiss message"
+        >
+          {'✕'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
  * App shell: header, a sidebar that is a slide-over drawer on small screens,
  * and the main pane. Sidebar content marks elements that navigate (and so
  * should close the drawer) with `data-closes-sidebar`. The desktop app
  * passes no `onLogout` and `homeLink={false}`: it has no sign-in or landing page.
+ *
+ * `notice` is a problem to report; `status` is good news (such as a sent
+ * message), optionally with a `statusAction` ({ label, onClick }) like Undo,
+ * and a `statusKey` that changes with each one, so the same news twice is
+ * spoken twice. `actions` sit in the header; `inert` shuts the page off
+ * while a dialog is open over it.
  */
 export default function Layout({
   email,
@@ -28,6 +63,12 @@ export default function Layout({
   homeLink = true,
   notice,
   onDismissNotice,
+  status,
+  statusKey,
+  statusAction,
+  onDismissStatus,
+  actions,
+  inert = false,
   sidebar,
   children,
 }) {
@@ -37,6 +78,22 @@ export default function Layout({
   const openButtonRef = useRef(null);
   const closeButtonRef = useRef(null);
   const wasOpenRef = useRef(false);
+
+  // Good news is spoken through a live region that is always on the page:
+  // screen readers often miss one that appears already holding its text,
+  // and never repeat text that has not changed ("Archived." twice). So it
+  // is emptied, then filled a moment later, for each new status.
+  const announcerRef = useRef(null);
+  useEffect(() => {
+    const announcer = announcerRef.current;
+    if (!announcer) return undefined;
+    announcer.textContent = '';
+    if (!status) return undefined;
+    const timer = setTimeout(() => {
+      announcer.textContent = status;
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [status, statusKey]);
 
   // Move focus into the drawer when it opens and back when it closes.
   useEffect(() => {
@@ -62,7 +119,7 @@ export default function Layout({
   };
 
   return (
-    <div className="h-dvh flex flex-col bg-canvas">
+    <div className="h-dvh flex flex-col bg-canvas" inert={inert}>
       <header
         className="flex items-center justify-between px-4 py-2 border-b border-line bg-canvas shrink-0"
         inert={drawerOpen}
@@ -97,6 +154,7 @@ export default function Layout({
           )}
         </div>
         <div className="flex items-center gap-3">
+          {actions}
           <span className="text-sm text-ink-muted hidden sm:inline">{email}</span>
           {onLogout && (
             <button
@@ -110,18 +168,15 @@ export default function Layout({
       </header>
 
       {notice && (
-        <div role="alert" className="flex items-start justify-between gap-3 bg-danger-bg text-danger-ink text-sm px-4 py-2 border-b border-danger-line">
-          <span>{notice}</span>
-          {onDismissNotice && (
-            <button
-              onClick={onDismissNotice}
-              className="shrink-0 rounded px-1 hover:opacity-70 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
-              aria-label="Dismiss message"
-            >
-              {'✕'}
-            </button>
-          )}
-        </div>
+        <Banner role="alert" onDismiss={onDismissNotice} className="bg-danger-bg text-danger-ink border-danger-line">
+          {notice}
+        </Banner>
+      )}
+      <div ref={announcerRef} role="status" className="sr-only" />
+      {status && (
+        <Banner onDismiss={onDismissStatus} action={statusAction} className="bg-accent-soft text-ink border-line">
+          {status}
+        </Banner>
       )}
 
       <div className="flex flex-1 min-h-0 relative">

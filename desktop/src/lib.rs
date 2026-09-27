@@ -6,7 +6,9 @@
 
 mod commands;
 mod credentials;
+mod downloads;
 mod state;
+mod watcher;
 
 use inboxmax_core::fake_mail::WithDemoMailbox;
 use state::DesktopState;
@@ -23,6 +25,49 @@ fn database_path(app: &tauri::App) -> anyhow::Result<PathBuf> {
     };
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join("inboxmax.db"))
+}
+
+/// A setting that only tests use (where downloads go, how often mail is
+/// checked, a file to write notifications to). Release builds ignore them,
+/// so nothing in the environment can quietly redirect or record mail.
+pub(crate) fn test_setting(name: &str) -> Option<std::ffi::OsString> {
+    if cfg!(debug_assertions) {
+        std::env::var_os(name)
+    } else {
+        None
+    }
+}
+
+/// The window's preferred size, in logical pixels.
+const PREFERRED_SIZE: (f64, f64) = (1200.0, 800.0);
+/// The most of the screen's work area the window takes at first.
+const MAX_SCREEN_SHARE: f64 = 0.9;
+
+/// The first window size for a work area of `screen` logical pixels: the
+/// preferred size, shrunk to fit. Wide enough for the sidebar layout on any
+/// screen that can show it.
+fn initial_size(screen: (f64, f64)) -> (f64, f64) {
+    (
+        PREFERRED_SIZE.0.min(screen.0 * MAX_SCREEN_SHARE),
+        PREFERRED_SIZE.1.min(screen.1 * MAX_SCREEN_SHARE),
+    )
+}
+
+/// Size the main window for the monitor it opened on, and center it. A
+/// fixed size in the config came out at physical pixels on scaled Windows
+/// displays (1100 px at 150% is 734 CSS pixels: the phone layout).
+fn fit_to_screen(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    let Some(monitor) = window.current_monitor()? else {
+        return Ok(());
+    };
+    let scale = monitor.scale_factor();
+    let area = monitor.work_area().size;
+    let (width, height) = initial_size((
+        f64::from(area.width) / scale,
+        f64::from(area.height) / scale,
+    ));
+    window.set_size(tauri::LogicalSize::new(width, height))?;
+    window.center()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -45,7 +90,13 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            if let Some(window) = app.get_webview_window("main")
+                && let Err(e) = fit_to_screen(&window)
+            {
+                tracing::warn!("Could not size the window: {e}");
+            }
             let path = database_path(app)?;
             let state = tauri::async_runtime::block_on(async {
                 let db = inboxmax_core::db::init_pool_at(&path).await?;
@@ -63,6 +114,7 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 handle.state::<DesktopState>().load_saved_passwords().await;
             });
+            tauri::async_runtime::spawn(watcher::run(app.handle().clone()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -74,6 +126,24 @@ pub fn run() {
             commands::list_emails,
             commands::get_email,
             commands::search_emails,
+            commands::send_email,
+            commands::list_drafts,
+            commands::get_draft,
+            commands::save_draft,
+            commands::delete_draft,
+            commands::move_email,
+            commands::restore_email,
+            commands::save_attachment,
+            commands::save_folder_attachment,
+            commands::get_signature,
+            commands::set_signature,
+            commands::list_folders,
+            commands::list_folder_emails,
+            commands::get_folder_email,
+            commands::show_in_folder,
+            commands::list_contacts,
+            commands::save_contact,
+            commands::delete_contact,
             commands::set_watermark,
             commands::list_remembered,
             commands::remember_email,
@@ -82,4 +152,19 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Inbox Max");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::initial_size;
+
+    #[test]
+    fn the_first_window_fits_the_screen_and_prefers_room_for_the_sidebar() {
+        // A 1920x1080 display at 150% (the taskbar leaves 688 of 720).
+        assert_eq!(initial_size((1280.0, 688.0)), (1152.0, 619.2));
+        // Room to spare: the preferred size.
+        assert_eq!(initial_size((2560.0, 1400.0)), (1200.0, 800.0));
+        // A small screen gets most of it rather than overflowing.
+        assert_eq!(initial_size((800.0, 600.0)), (720.0, 540.0));
+    }
 }

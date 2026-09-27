@@ -4,12 +4,18 @@
 //! profile over Tauri IPC.
 
 pub mod account;
+pub mod attachment;
 pub mod config;
+pub mod contacts;
 pub mod db;
+pub mod drafts;
 pub mod error;
 pub mod fake_mail;
 pub mod imap_client;
 pub mod mailbox;
+pub mod outgoing;
+pub mod signature;
+mod smtp;
 
 pub use account::ConnectedAccount;
 pub use error::{AppError, AppResult};

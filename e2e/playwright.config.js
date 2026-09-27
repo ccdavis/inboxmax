@@ -25,7 +25,7 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'cd ../server && rm -f target/e2e/inboxmax.db* && cargo run --features fake-mail',
+    command: 'node reset-db.mjs && cd ../server && cargo run --features fake-mail',
     env: {
       PORT: String(PORT),
       DATABASE_URL: 'sqlite:target/e2e/inboxmax.db',

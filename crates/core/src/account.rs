@@ -1,13 +1,13 @@
 //! Mail accounts: normalizing addresses, verifying and saving IMAP
 //! connections, and listing or removing the accounts a user owns.
 
-use crate::config::{detect_provider, guess_provider};
+use crate::config::{DEFAULT_SMTP_PORT, detect_provider, guess_provider};
 use crate::error::{AppError, AppResult};
-use crate::imap_client::{MailCredentials, MailFetcher};
+use crate::imap_client::{MailCredentials, MailFetcher, SmtpServer};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
-/// A mail account whose IMAP password is currently available.
+/// A mail account whose password is currently available.
 #[derive(Clone)]
 pub struct ConnectedAccount {
     pub id: String,
@@ -15,6 +15,7 @@ pub struct ConnectedAccount {
     pub password: String,
     pub imap_host: String,
     pub imap_port: u16,
+    pub smtp: SmtpServer,
 }
 
 impl ConnectedAccount {
@@ -35,6 +36,48 @@ pub struct AccountRecord {
     pub email: String,
     pub imap_host: String,
     pub imap_port: i64,
+    /// Empty for accounts saved before sending existed.
+    pub smtp_host: String,
+    pub smtp_port: i64,
+}
+
+impl AccountRecord {
+    /// The account, usable now that its password is known.
+    pub fn connected(self, password: String) -> ConnectedAccount {
+        let smtp = stored_smtp_server(&self.email, &self.smtp_host, self.smtp_port);
+        ConnectedAccount {
+            imap_port: u16::try_from(self.imap_port).unwrap_or(993),
+            id: self.id,
+            email: self.email,
+            password,
+            imap_host: self.imap_host,
+            smtp,
+        }
+    }
+}
+
+/// The saved SMTP server, or for accounts saved before sending existed, the
+/// provider's (or a guess from the domain).
+fn stored_smtp_server(email: &str, host: &str, port: i64) -> SmtpServer {
+    if !host.is_empty() {
+        return SmtpServer {
+            host: host.to_string(),
+            port: u16::try_from(port)
+                .ok()
+                .filter(|p| *p != 0)
+                .unwrap_or(DEFAULT_SMTP_PORT),
+        };
+    }
+    detect_provider(email)
+        .or_else(|| guess_provider(email))
+        .map(|provider| SmtpServer {
+            host: provider.smtp_host,
+            port: provider.smtp_port,
+        })
+        .unwrap_or(SmtpServer {
+            host: String::new(),
+            port: DEFAULT_SMTP_PORT,
+        })
 }
 
 /// An account as shown to the client.
@@ -49,12 +92,22 @@ pub struct AccountStatus {
     pub password_saved: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 pub struct ConnectRequest {
     pub email: String,
     pub password: String,
     pub imap_host: Option<String>,
     pub imap_port: Option<u16>,
+    pub smtp_host: Option<String>,
+    pub smtp_port: Option<u16>,
+}
+
+/// Where a connect request's mailbox lives, worked out without contacting it.
+pub struct Connection {
+    pub credentials: MailCredentials,
+    pub smtp: SmtpServer,
+    /// Settings came from a recognized provider rather than a guess or override.
+    pub provider_detected: bool,
 }
 
 /// Reply to a successful connect, from both the web API and desktop IPC.
@@ -88,35 +141,45 @@ pub fn normalize_email(input: &str) -> AppResult<String> {
     Ok(email)
 }
 
-/// Work out the IMAP server for a connect request (explicit override,
-/// known provider, or `imap.<domain>`) without contacting it.
-pub fn resolve_connection(req: ConnectRequest) -> AppResult<(MailCredentials, bool)> {
-    let email = normalize_email(&req.email)?;
-    let custom_host = req
-        .imap_host
-        .as_deref()
-        .map(str::trim)
+fn custom_host(host: Option<&str>) -> Option<String> {
+    host.map(str::trim)
         .filter(|host| !host.is_empty())
-        .map(str::to_lowercase);
+        .map(str::to_lowercase)
+}
+
+/// Work out the IMAP and SMTP servers for a connect request (explicit
+/// overrides, known provider, or `imap.`/`smtp.<domain>`) without contacting them.
+pub fn resolve_connection(req: ConnectRequest) -> AppResult<Connection> {
+    let email = normalize_email(&req.email)?;
+    let imap_host = custom_host(req.imap_host.as_deref());
+    let smtp_host = custom_host(req.smtp_host.as_deref());
     let detected_provider = detect_provider(&email);
-    let provider_detected = detected_provider.is_some() && custom_host.is_none();
+    let provider_detected =
+        detected_provider.is_some() && imap_host.is_none() && smtp_host.is_none();
     let provider = detected_provider
         .or_else(|| guess_provider(&email))
         .ok_or_else(|| AppError::BadRequest("Unable to determine IMAP host".into()))?;
-    let host = custom_host.unwrap_or(provider.imap_host);
-    let port = req.imap_port.unwrap_or(provider.imap_port);
-    if port == 0 {
+    let imap_port = req.imap_port.unwrap_or(provider.imap_port);
+    if imap_port == 0 {
         return Err(AppError::BadRequest("Invalid IMAP port".into()));
     }
-    Ok((
-        MailCredentials {
-            host,
-            port,
+    let smtp_port = req.smtp_port.unwrap_or(provider.smtp_port);
+    if smtp_port == 0 {
+        return Err(AppError::BadRequest("Invalid SMTP port".into()));
+    }
+    Ok(Connection {
+        credentials: MailCredentials {
+            host: imap_host.unwrap_or(provider.imap_host),
+            port: imap_port,
             email,
             password: req.password,
         },
+        smtp: SmtpServer {
+            host: smtp_host.unwrap_or(provider.smtp_host),
+            port: smtp_port,
+        },
         provider_detected,
-    ))
+    })
 }
 
 /// Verify credentials against the mail server and save the account for
@@ -127,9 +190,13 @@ pub async fn connect_account(
     owner_user_id: &str,
     req: ConnectRequest,
 ) -> AppResult<ConnectOutcome> {
-    let (credentials, provider_detected) = resolve_connection(req)?;
+    let Connection {
+        credentials,
+        smtp,
+        provider_detected,
+    } = resolve_connection(req)?;
     mail.verify_credentials(&credentials).await?;
-    let id = save_account(db, owner_user_id, &credentials).await?;
+    let id = save_account(db, owner_user_id, &credentials, &smtp).await?;
     Ok(ConnectOutcome {
         account: ConnectedAccount {
             id,
@@ -137,6 +204,7 @@ pub async fn connect_account(
             password: credentials.password,
             imap_host: credentials.host,
             imap_port: credentials.port,
+            smtp,
         },
         provider_detected,
     })
@@ -148,15 +216,17 @@ pub async fn save_account(
     db: &SqlitePool,
     owner_user_id: &str,
     credentials: &MailCredentials,
+    smtp: &SmtpServer,
 ) -> AppResult<String> {
-    // The conditional upsert makes ownership enforcement atomic. The SMTP
-    // columns are legacy schema fields retained for migration compatibility.
+    // The conditional upsert makes ownership enforcement atomic.
     let result = sqlx::query(
         "INSERT INTO accounts (id, email, imap_host, imap_port, smtp_host, smtp_port, user_id)
-         VALUES (?, ?, ?, ?, '', 0, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT DO UPDATE SET
            imap_host = excluded.imap_host,
            imap_port = excluded.imap_port,
+           smtp_host = excluded.smtp_host,
+           smtp_port = excluded.smtp_port,
            user_id = excluded.user_id
          WHERE accounts.user_id IS NULL OR accounts.user_id = excluded.user_id",
     )
@@ -164,6 +234,8 @@ pub async fn save_account(
     .bind(&credentials.email)
     .bind(&credentials.host)
     .bind(i64::from(credentials.port))
+    .bind(&smtp.host)
+    .bind(i64::from(smtp.port))
     .bind(owner_user_id)
     .execute(db)
     .await?;
@@ -184,7 +256,7 @@ pub async fn save_account(
 /// Accounts owned by a user, in the order they were added.
 pub async fn list_accounts(db: &SqlitePool, owner_user_id: &str) -> AppResult<Vec<AccountRecord>> {
     Ok(sqlx::query_as(
-        "SELECT id, email, imap_host, imap_port FROM accounts
+        "SELECT id, email, imap_host, imap_port, smtp_host, smtp_port FROM accounts
          WHERE user_id = ? ORDER BY created_at, rowid",
     )
     .bind(owner_user_id)
@@ -199,7 +271,7 @@ pub async fn find_account(
     account_id: &str,
 ) -> AppResult<AccountRecord> {
     sqlx::query_as(
-        "SELECT id, email, imap_host, imap_port FROM accounts WHERE id = ? AND user_id = ?",
+        "SELECT id, email, imap_host, imap_port, smtp_host, smtp_port FROM accounts WHERE id = ? AND user_id = ?",
     )
     .bind(account_id)
     .bind(owner_user_id)
@@ -228,14 +300,22 @@ pub async fn delete_account(
 
 #[cfg(test)]
 mod tests {
-    use super::{ConnectRequest, normalize_email, resolve_connection};
+    use super::{AccountRecord, ConnectRequest, normalize_email, resolve_connection};
+    use crate::imap_client::SmtpServer;
 
     fn request(email: &str, host: Option<&str>) -> ConnectRequest {
         ConnectRequest {
             email: email.into(),
             password: "secret".into(),
             imap_host: host.map(Into::into),
-            imap_port: None,
+            ..ConnectRequest::default()
+        }
+    }
+
+    fn smtp(host: &str, port: u16) -> SmtpServer {
+        SmtpServer {
+            host: host.into(),
+            port,
         }
     }
 
@@ -252,24 +332,60 @@ mod tests {
 
     #[test]
     fn resolves_known_guessed_and_overridden_hosts() {
-        let (known, detected) = resolve_connection(request("me@gmail.com", None)).unwrap();
-        assert_eq!((known.host.as_str(), detected), ("imap.gmail.com", true));
+        let known = resolve_connection(request("me@gmail.com", None)).unwrap();
+        assert_eq!(known.credentials.host, "imap.gmail.com");
+        assert_eq!(known.smtp, smtp("smtp.gmail.com", 587));
+        assert!(known.provider_detected);
 
-        let (guessed, detected) = resolve_connection(request("me@example.com", None)).unwrap();
-        assert_eq!(
-            (guessed.host.as_str(), detected),
-            ("imap.example.com", false)
-        );
+        let guessed = resolve_connection(request("me@example.com", None)).unwrap();
+        assert_eq!(guessed.credentials.host, "imap.example.com");
+        assert_eq!(guessed.smtp, smtp("smtp.example.com", 587));
+        assert!(!guessed.provider_detected);
 
         // A blank override is ignored rather than treated as a custom host.
-        let (blank, detected) = resolve_connection(request("me@gmail.com", Some("  "))).unwrap();
-        assert_eq!((blank.host.as_str(), detected), ("imap.gmail.com", true));
+        let blank = resolve_connection(request("me@gmail.com", Some("  "))).unwrap();
+        assert_eq!(blank.credentials.host, "imap.gmail.com");
+        assert!(blank.provider_detected);
 
-        let (custom, detected) =
+        let custom =
             resolve_connection(request("me@gmail.com", Some(" IMAP.Custom.test "))).unwrap();
-        assert_eq!(
-            (custom.host.as_str(), detected),
-            ("imap.custom.test", false)
+        assert_eq!(custom.credentials.host, "imap.custom.test");
+        assert!(!custom.provider_detected);
+
+        let custom_smtp = resolve_connection(ConnectRequest {
+            smtp_host: Some(" Mail.Custom.test ".into()),
+            smtp_port: Some(465),
+            ..request("me@gmail.com", None)
+        })
+        .unwrap();
+        assert_eq!(custom_smtp.credentials.host, "imap.gmail.com");
+        assert_eq!(custom_smtp.smtp, smtp("mail.custom.test", 465));
+        assert!(!custom_smtp.provider_detected);
+
+        assert!(
+            resolve_connection(ConnectRequest {
+                smtp_port: Some(0),
+                ..request("me@gmail.com", None)
+            })
+            .is_err()
         );
+    }
+
+    #[test]
+    fn accounts_saved_before_sending_existed_get_the_providers_smtp_server() {
+        let record = |email: &str, host: &str, port: i64| AccountRecord {
+            id: "a".into(),
+            email: email.into(),
+            imap_host: "imap.example.com".into(),
+            imap_port: 993,
+            smtp_host: host.into(),
+            smtp_port: port,
+        };
+        let legacy = record("me@icloud.com", "", 0).connected("pw".into());
+        assert_eq!(legacy.smtp, smtp("smtp.mail.me.com", 587));
+        let guessed = record("me@example.com", "", 0).connected("pw".into());
+        assert_eq!(guessed.smtp, smtp("smtp.example.com", 587));
+        let saved = record("me@example.com", "mail.example.com", 465).connected("pw".into());
+        assert_eq!(saved.smtp, smtp("mail.example.com", 465));
     }
 }

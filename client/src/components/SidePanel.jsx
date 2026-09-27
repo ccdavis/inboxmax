@@ -1,16 +1,28 @@
 import SearchBox from './SearchBox';
 import AccountList from './AccountList';
 import RememberedList from './RememberedList';
+import DraftsList from './DraftsList';
+import FoldersList from './FoldersList';
 import DayGroup from './DayGroup';
 import { groupByDay } from '../utils/dates';
 
+const TOOL_BUTTON =
+  'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm text-ink-soft hover:bg-hover hover:text-ink transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500';
+
 /**
- * Sidebar content: search, the user's mailboxes, remembered emails, and the
- * inbox browsable by day. `accounts` is optional so the panel also works
- * without mailbox switching.
+ * Sidebar content: search, the user's mailboxes, the address book and
+ * signature, drafts, the server's folders, remembered emails, and the
+ * inbox browsable by day.
+ * `accounts` is optional so the panel also works without mailbox switching;
+ * `folders` is FoldersList's props.
  */
 export default function SidePanel({
   accounts,
+  onOpenAddressBook,
+  onOpenSignature,
+  drafts = [],
+  onOpenDraft,
+  folders,
   emails,
   remembered,
   selectedUid,
@@ -28,6 +40,25 @@ export default function SidePanel({
 
       <nav className="flex-1 overflow-y-auto" aria-label="Browse emails">
         {accounts && <AccountList {...accounts} />}
+
+        {(onOpenAddressBook || onOpenSignature) && (
+          <div className="border-b border-line px-1 py-1">
+            {onOpenAddressBook && (
+              <button type="button" data-closes-sidebar onClick={onOpenAddressBook} className={TOOL_BUTTON}>
+                <span aria-hidden="true">📇</span> Address book
+              </button>
+            )}
+            {onOpenSignature && (
+              <button type="button" data-closes-sidebar onClick={onOpenSignature} className={TOOL_BUTTON}>
+                <span aria-hidden="true">✍</span> Signature
+              </button>
+            )}
+          </div>
+        )}
+
+        {onOpenDraft && <DraftsList drafts={drafts} onOpen={onOpenDraft} />}
+
+        {folders && <FoldersList {...folders} />}
 
         <RememberedList
           remembered={remembered}
