@@ -7,8 +7,9 @@ use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use axum_extra::extract::CookieJar;
 use inboxmax_core::attachment;
-use inboxmax_core::imap_client::Folder;
+use inboxmax_core::attachment::Attachment;
 use inboxmax_core::imap_client::{EmailEnvelope, FullEmail};
+use inboxmax_core::imap_client::{Folder, FolderInfo};
 use inboxmax_core::mailbox::{self, EmailListResponse, Restored};
 use inboxmax_core::outgoing::{SendReceipt, SendRequest};
 use serde::Deserialize;
@@ -104,11 +105,64 @@ pub async fn download_attachment(
 ) -> AppResult<Response> {
     let account = require_account(&state, &jar, &account_id).await?;
     let attachment = mailbox::get_attachment(state.mail.as_ref(), &account, uid, index).await?;
+    Ok(download(attachment))
+}
+
+/// GET /api/accounts/{account_id}/folders
+pub async fn list_folders(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(account_id): Path<String>,
+) -> AppResult<Json<Vec<FolderInfo>>> {
+    let account = require_account(&state, &jar, &account_id).await?;
+    Ok(Json(
+        mailbox::list_folders(state.mail.as_ref(), &account).await?,
+    ))
+}
+
+/// GET /api/accounts/{account_id}/folders/{folder}/emails
+pub async fn folder_emails(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((account_id, folder)): Path<(String, Folder)>,
+) -> AppResult<Json<Vec<EmailEnvelope>>> {
+    let account = require_account(&state, &jar, &account_id).await?;
+    Ok(Json(
+        mailbox::folder_emails(state.mail.as_ref(), &account, folder).await?,
+    ))
+}
+
+/// GET /api/accounts/{account_id}/folders/{folder}/emails/{uid}
+pub async fn get_folder_email(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((account_id, folder, uid)): Path<(String, Folder, i64)>,
+) -> AppResult<Json<FullEmail>> {
+    let account = require_account(&state, &jar, &account_id).await?;
+    Ok(Json(
+        mailbox::get_folder_email(state.mail.as_ref(), &account, folder, uid).await?,
+    ))
+}
+
+/// GET /api/accounts/{account_id}/folders/{folder}/emails/{uid}/attachments/{index}
+pub async fn download_folder_attachment(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path((account_id, folder, uid, index)): Path<(String, Folder, i64, usize)>,
+) -> AppResult<Response> {
+    let account = require_account(&state, &jar, &account_id).await?;
+    let attachment =
+        mailbox::get_folder_attachment(state.mail.as_ref(), &account, folder, uid, index).await?;
+    Ok(download(attachment))
+}
+
+/// An attachment as a download, never shown in the page.
+fn download(attachment: Attachment) -> Response {
     let content_type = HeaderValue::from_str(&attachment.content_type)
         .unwrap_or(HeaderValue::from_static("application/octet-stream"));
     let disposition = HeaderValue::from_str(&attachment::content_disposition(&attachment.filename))
         .unwrap_or(HeaderValue::from_static("attachment"));
-    Ok((
+    (
         [
             (header::CONTENT_TYPE, content_type),
             (header::CONTENT_DISPOSITION, disposition),
@@ -128,7 +182,7 @@ pub async fn download_attachment(
         ],
         attachment.data,
     )
-        .into_response())
+        .into_response()
 }
 
 /// PUT /api/accounts/{account_id}/watermark

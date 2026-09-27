@@ -243,6 +243,22 @@ describe('ComposeDialog', () => {
       expect(onSend.mock.calls[0][0]).toMatchObject({ attachments: [], forward: { uid: 994, indexes: [1] } });
     });
 
+    it('forwards attachments from the server folder the original is in', async () => {
+      const { onSend } = renderCompose({
+        title: 'Forward',
+        initial: {
+          subject: 'Fwd: Plan',
+          forward_uid: 3,
+          forward_folder: 'sent',
+          attachments: [{ index: 0, filename: 'plan.txt', content_type: 'text/plain', size: 10 }],
+        },
+      });
+      type(to(), 'a@x.example');
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+      await waitFor(() => expect(onSend).toHaveBeenCalled());
+      expect(onSend.mock.calls[0][0].forward).toEqual({ uid: 3, indexes: [0], folder: 'sent' });
+    });
+
     it('counts attachments as unsaved work', async () => {
       const { onClose } = renderCompose();
       attach(file('notes.txt', 'hello'));

@@ -44,6 +44,7 @@ describe('drafts', () => {
       references: [],
       attachments: [],
       forward_uid: null,
+      forward_folder: null,
     });
     expect(await within(dialog()).findByText('Draft saved')).toBeInTheDocument();
   });

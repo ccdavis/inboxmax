@@ -7,6 +7,7 @@ import Layout from './Layout';
 import SidePanel from './SidePanel';
 import EmailList from './EmailList';
 import EmailReader from './EmailReader';
+import FolderView from './FolderView';
 import Spinner from './Spinner';
 import { useAccounts } from '../hooks/useAccounts';
 import { useEmails } from '../hooks/useEmails';
@@ -39,6 +40,12 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
   // The open compose dialog: { title, initial }, or null.
   const [compose, setCompose] = useState(null);
   const [addressBookOpen, setAddressBookOpen] = useState(false);
+  // A server folder being looked through ({ kind, name }), in place of the
+  // inbox, and the message open from it. UIDs are per folder, so the
+  // folder's is kept apart from the inbox's `selectedUid`.
+  const [folder, setFolder] = useState(null);
+  const [folderUid, setFolderUid] = useState(null);
+  const [folderReload, setFolderReload] = useState(0);
 
   // Only a mailbox whose password is available can be read.
   const accountId = active?.connected ? active.id : null;
@@ -90,14 +97,16 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
   }, [errorStatus, errorAccountId, onSignOut, refreshAccounts]);
 
   // Leaving the inbox view means the headers on it have been seen. Search
-  // results replace the inbox on screen, so leaving during a search does not.
+  // results and server folders replace the inbox on screen, so leaving from
+  // them does not.
+  const inboxHidden = searchMode || folder != null;
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden' && !searchMode) markAllSeen();
+      if (document.visibilityState === 'hidden' && !inboxHidden) markAllSeen();
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, [markAllSeen, searchMode]);
+  }, [markAllSeen, inboxHidden]);
 
   // Poll for new emails while the window is visible.
   useEffect(() => {
@@ -108,16 +117,55 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
     return () => clearInterval(id);
   }, [fetchEmails, accountId]);
 
+  const leaveFolder = () => {
+    setFolder(null);
+    setFolderUid(null);
+  };
+
   const resetView = () => {
     setSelectedUid(null);
     setSearchQuery(null);
     clearSearch();
+    leaveFolder();
+  };
+
+  /** Show the inbox's message `uid`, leaving any folder. */
+  const openInboxEmail = (uid) => {
+    leaveFolder();
+    setSelectedUid(uid);
+  };
+
+  const handleOpenFolder = (next) => {
+    setStatus(null);
+    setSearchQuery(null);
+    clearSearch();
+    setSelectedUid(null);
+    setFolder(next);
+    setFolderUid(null);
+    // Choosing the open folder again shows it afresh.
+    setFolderReload((n) => n + 1);
+  };
+
+  /** Put a message from Trash, Archive or Junk back in the inbox. */
+  const handleMoveToInbox = async (email) => {
+    const from = folder.kind;
+    setNotice(null);
+    try {
+      await api.restoreEmail(active.id, from, email.message_id);
+    } catch (caught) {
+      setNotice(`Could not move “${email.subject || '(no subject)'}” to the inbox: ${caught.message}`);
+      return;
+    }
+    setFolderUid(null);
+    setFolderReload((n) => n + 1);
+    setStatus({ text: 'Moved to the inbox.' });
+    fetchEmails();
   };
 
   const handleSelectAccount = (id) => {
     if (id === active?.id) return;
     // Leaving a mailbox counts as having seen its inbox, as leaving the page does.
-    if (!searchMode) markAllSeen();
+    if (!inboxHidden) markAllSeen();
     resetView();
     setNotice(null);
     selectAccount(id);
@@ -151,7 +199,7 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
   const handleReply = (kind, email) => {
     setStatus(null);
     if (kind === 'forward') {
-      setCompose({ title: 'Forward', initial: forwardDraft(email), draftId: newId() });
+      setCompose({ title: 'Forward', initial: forwardDraft(email, { folder: folder?.kind }), draftId: newId() });
     } else {
       setCompose({
         title: kind === 'all' ? 'Reply all' : 'Reply',
@@ -176,6 +224,8 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
   const handleSent = (receipt, request) => {
     setCompose(null);
     refreshDrafts();
+    // An open Sent folder now has one more.
+    setFolderReload((n) => n + 1);
     const recipients = [...request.to, ...request.cc, ...request.bcc];
     const first = recipients[0].name || recipients[0].email;
     const who = recipients.length > 1 ? `${first} and ${recipients.length - 1} more` : first;
@@ -252,6 +302,7 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
   };
 
   const handleSearch = (query) => {
+    leaveFolder();
     setSearchQuery(query);
     setSelectedUid(null);
     search(query);
@@ -352,18 +403,40 @@ export default function InboxPage({ onSignOut, canSavePasswords = false }) {
           onOpenAddressBook={() => setAddressBookOpen(true)}
           drafts={drafts}
           onOpenDraft={handleOpenDraft}
+          folders={{ accountId: active.id, activeKind: folder?.kind, onOpen: handleOpenFolder }}
           emails={emails}
           remembered={remembered}
-          selectedUid={selectedUid}
+          selectedUid={folder ? null : selectedUid}
           onSearch={handleSearch}
           onClearSearch={handleClearSearch}
           onForget={forget}
-          onSelectEmail={(email) => setSelectedUid(email.uid)}
-          onSelectRemembered={setSelectedUid}
+          onSelectEmail={(email) => openInboxEmail(email.uid)}
+          onSelectRemembered={openInboxEmail}
         />
       }
     >
-      {selectedUid ? (
+      {folder ? (
+        folderUid ? (
+          <EmailReader
+            key={folder.kind}
+            accountId={active.id}
+            emailUid={folderUid}
+            folder={folder}
+            onBack={() => setFolderUid(null)}
+            me={active.email}
+            onReply={handleReply}
+            onMoveToInbox={handleMoveToInbox}
+          />
+        ) : (
+          <FolderView
+            accountId={active.id}
+            folder={folder}
+            reloadKey={folderReload}
+            onSelect={(email) => setFolderUid(email.uid)}
+            onBack={leaveFolder}
+          />
+        )
+      ) : selectedUid ? (
         <EmailReader
           accountId={active.id}
           emailUid={selectedUid}

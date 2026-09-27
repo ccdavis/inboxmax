@@ -1,7 +1,7 @@
 // Desktop-only paths through WebDriver, on the built-in demo mailbox as a
 // user would reach it (no INBOXMAX_FAKE_MAIL): the demo button, saving
-// attachments into Downloads, sending and suggestions over IPC, and
-// delete with undo. Run after `npm run build:test`.
+// attachments into Downloads, sending and suggestions over IPC, delete
+// with undo, and the server folders. Run after `npm run build:test`.
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
@@ -103,5 +103,35 @@ describe('Inbox Max desktop features', () => {
       await click(session, 'button', 'Undo');
       await session.find('[role="status"]', { text: 'Moved back to the inbox.' });
       await session.find('main li', { text: 'Team standup notes' });
+    }));
+
+  it('reads the server folders: saves from Trash, moves back, and shows Junk', () =>
+    withApp(async (session) => {
+      await click(session, 'main li button', 'Quick question about the API spec');
+      await click(session, 'article button', 'Delete');
+      await session.find('[role="status"]', { text: 'Moved to Trash.' });
+
+      await click(session, 'aside button', 'Server folders');
+      await click(session, 'aside button', 'Trash');
+      await click(session, 'main li button', 'Quick question about the API spec');
+      await session.find('h1', { text: 'Quick question about the API spec' });
+      await click(session, 'button[aria-label^="Download API spec v2 (draft).txt"]');
+      // The earlier test saved two copies already.
+      await session.find('[role="status"]', { text: 'Saved API spec v2 (draft) (2).txt in Downloads.' });
+      assert.equal(
+        readFileSync(join(downloads, 'API spec v2 (draft) (2).txt'), 'utf8'),
+        'PATCH /v2/items/{id} accepts partial updates.\n',
+      );
+
+      await click(session, 'article button', 'Move to Inbox');
+      await session.find('[role="status"]', { text: 'Moved to the inbox.' });
+      await session.find('main', { text: 'Nothing in Trash.' });
+
+      await click(session, 'aside button', 'Junk');
+      await click(session, 'main li button', 'You have won a prize!');
+      await session.find('h1', { text: 'You have won a prize!' });
+      await click(session, 'article button', 'Back to Junk');
+      await click(session, 'main button', 'Inbox');
+      await session.find('main li', { text: 'Quick question about the API spec' });
     }));
 });

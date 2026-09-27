@@ -79,6 +79,22 @@ pub fn api_router(state: AppState) -> axum::Router {
             post(emails::restore_email),
         )
         .route(
+            "/api/accounts/{account_id}/folders",
+            get(emails::list_folders),
+        )
+        .route(
+            "/api/accounts/{account_id}/folders/{folder}/emails",
+            get(emails::folder_emails),
+        )
+        .route(
+            "/api/accounts/{account_id}/folders/{folder}/emails/{uid}",
+            get(emails::get_folder_email),
+        )
+        .route(
+            "/api/accounts/{account_id}/folders/{folder}/emails/{uid}/attachments/{index}",
+            get(emails::download_folder_attachment),
+        )
+        .route(
             "/api/accounts/{account_id}/drafts",
             get(drafts::list_drafts),
         )

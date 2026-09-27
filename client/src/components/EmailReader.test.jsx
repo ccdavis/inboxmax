@@ -6,6 +6,8 @@ import EmailReader from './EmailReader';
 vi.mock('../api', () => ({
   getEmail: vi.fn(),
   downloadAttachment: vi.fn(),
+  getFolderEmail: vi.fn(),
+  downloadFolderAttachment: vi.fn(),
   showInFolder: vi.fn(),
 }));
 
@@ -248,6 +250,67 @@ describe('EmailReader', () => {
     it('shows nothing for a message without attachments', async () => {
       await renderWithAttachments([]);
       expect(screen.queryByRole('region', { name: 'Attachments' })).toBeNull();
+    });
+  });
+
+
+  describe('in a server folder', () => {
+    const TRASHED = {
+      uid: 5,
+      subject: 'Old news',
+      from: [{ name: 'Ann', email: 'ann@x.example' }],
+      to: [{ name: null, email: 'me@example.com' }],
+      date: null,
+      body_html: null,
+      body_text: 'Hello',
+      message_id: 'old@x.example',
+      attachments: [{ index: 0, filename: 'notes.txt', content_type: 'text/plain', size: 5 }],
+    };
+
+    it('reads from the folder, downloads from it, and offers to move back to the inbox', async () => {
+      api.getFolderEmail.mockResolvedValue(TRASHED);
+      api.downloadFolderAttachment.mockResolvedValue(null);
+      const onMoveToInbox = vi.fn();
+      const onBack = vi.fn();
+      render(
+        <EmailReader
+          accountId="acct"
+          emailUid={5}
+          folder={{ kind: 'trash', name: 'Deleted Items' }}
+          me="me@example.com"
+          onReply={() => {}}
+          onMoveToInbox={onMoveToInbox}
+          onBack={onBack}
+        />,
+      );
+      await screen.findByRole('heading', { name: 'Old news' });
+      expect(api.getFolderEmail).toHaveBeenCalledWith('acct', 'trash', 5);
+      expect(api.getEmail).not.toHaveBeenCalled();
+      // Nothing that moves mail out of the inbox.
+      expect(screen.queryByRole('button', { name: /Archive|Delete/ })).toBeNull();
+
+      screen.getByRole('button', { name: /^Download notes\.txt/ }).click();
+      await waitFor(() => expect(api.downloadFolderAttachment).toHaveBeenCalledWith('acct', 'trash', 5, 0));
+
+      screen.getByRole('button', { name: /Move to Inbox/ }).click();
+      expect(onMoveToInbox).toHaveBeenCalledWith(TRASHED);
+      screen.getByRole('button', { name: /Back to Trash/ }).click();
+      expect(onBack).toHaveBeenCalled();
+    });
+
+    it('offers no move for sent mail, or for a message it could not find again', async () => {
+      api.getFolderEmail.mockResolvedValue(TRASHED);
+      const props = { accountId: 'acct', emailUid: 5, me: 'me@example.com', onReply: () => {}, onMoveToInbox: () => {}, onBack: () => {} };
+      render(<EmailReader {...props} folder={{ kind: 'sent', name: 'Sent' }} />);
+      await screen.findByRole('heading', { name: 'Old news' });
+      expect(screen.getByRole('button', { name: /Forward/ })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Move to Inbox/ })).toBeNull();
+      cleanup();
+
+      api.getFolderEmail.mockResolvedValue({ ...TRASHED, message_id: null });
+      render(<EmailReader {...props} folder={{ kind: 'junk', name: 'Spam' }} />);
+      await screen.findByRole('heading', { name: 'Old news' });
+      expect(screen.queryByRole('button', { name: /Move to Inbox/ })).toBeNull();
     });
   });
 

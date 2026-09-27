@@ -2,19 +2,22 @@ import SearchBox from './SearchBox';
 import AccountList from './AccountList';
 import RememberedList from './RememberedList';
 import DraftsList from './DraftsList';
+import FoldersList from './FoldersList';
 import DayGroup from './DayGroup';
 import { groupByDay } from '../utils/dates';
 
 /**
  * Sidebar content: search, the user's mailboxes, the address book, drafts,
- * remembered emails, and the inbox browsable by day. `accounts` is optional so the panel also works
- * without mailbox switching.
+ * the server's folders, remembered emails, and the inbox browsable by day.
+ * `accounts` is optional so the panel also works without mailbox switching;
+ * `folders` is FoldersList's props.
  */
 export default function SidePanel({
   accounts,
   onOpenAddressBook,
   drafts = [],
   onOpenDraft,
+  folders,
   emails,
   remembered,
   selectedUid,
@@ -47,6 +50,8 @@ export default function SidePanel({
         )}
 
         {onOpenDraft && <DraftsList drafts={drafts} onOpen={onOpenDraft} />}
+
+        {folders && <FoldersList {...folders} />}
 
         <RememberedList
           remembered={remembered}

@@ -40,6 +40,9 @@ export const transport = {
   getDraft: (accountId, draftId) => call('get_draft', { accountId, draftId }),
   saveDraft: (accountId, draftId, content) => call('save_draft', { accountId, draftId, content }),
   deleteDraft: (accountId, draftId) => call('delete_draft', { accountId, draftId }),
+  listFolders: (accountId) => call('list_folders', { accountId }),
+  getFolderEmails: (accountId, folder) => call('list_folder_emails', { accountId, folder }),
+  getFolderEmail: (accountId, folder, uid) => call('get_folder_email', { accountId, folder, uid }),
   moveEmail: (accountId, uid, to) => call('move_email', { accountId, uid, to }),
   restoreEmail: (accountId, from, messageId) => call('restore_email', { accountId, from, messageId }),
 
@@ -53,6 +56,8 @@ export const transport = {
   deleteContact: (id) => call('delete_contact', { id }),
 
   downloadAttachment: (accountId, uid, index) => call('save_attachment', { accountId, uid, index }),
+  downloadFolderAttachment: (accountId, folder, uid, index) =>
+    call('save_folder_attachment', { accountId, folder, uid, index }),
   showInFolder: (path) => call('show_in_folder', { path }),
 
   openExternal: (url) => call('open_external', { url }),

@@ -6,8 +6,8 @@
 use crate::attachment::{Attachment, safe_filename};
 use crate::error::{AppError, AppResult};
 use crate::imap_client::{
-    EmailEnvelope, Folder, FullEmail, MailAddress, MailCredentials, MailFetcher, MailboxSnapshot,
-    SmtpServer,
+    EmailEnvelope, Folder, FolderInfo, FullEmail, MailAddress, MailCredentials, MailFetcher,
+    MailboxSnapshot, SmtpServer,
 };
 use crate::mailbox::{self, RememberRequest};
 use crate::outgoing::{OutgoingEmail, SendReceipt};
@@ -266,6 +266,106 @@ fn envelopes(credentials: &MailCredentials) -> Vec<EmailEnvelope> {
         .collect()
 }
 
+/// A generated message as the reader shows it.
+fn full_email(credentials: &MailCredentials, generated: &Generated) -> FullEmail {
+    let message = generated.message;
+    let uid = generated.uid;
+    FullEmail {
+        uid,
+        subject: message.subject.to_string(),
+        from: vec![MailAddress::new(
+            Some(&generated.sender_name),
+            message.from.1,
+        )],
+        reply_to: addresses(message.reply_to.as_slice()),
+        to: vec![MailAddress::new(None, &credentials.email)],
+        cc: addresses(message.cc),
+        date: Some(generated.sent()),
+        received: Some(generated.received),
+        body_html: message.text.is_none().then(|| {
+            format!(
+                "<h2>{subject}</h2><p>This is a generated message from the demo mailbox.</p>\
+                 <ul><li>Sender: {name}</li><li>UID: {uid}</li></ul>\
+                 <p>Read more at <a href=\"https://example.com/\">example.com</a>.</p>",
+                subject = message.subject,
+                name = generated.sender_name,
+            )
+        }),
+        body_text: message.text.map(Into::into),
+        message_id: Some(message_id(uid)),
+        references: message.thread.iter().map(|id| id.to_string()).collect(),
+        attachments: attachments(message)
+            .iter()
+            .enumerate()
+            .map(|(index, attachment)| attachment.info(index))
+            .collect(),
+    }
+}
+
+/// Messages moved from the inbox into `folder`, as they were.
+fn moved_to(credentials: &MailCredentials, folder: Folder) -> Vec<Generated> {
+    let moved: Vec<u32> = moved()
+        .iter()
+        .filter(|(account, _, to)| {
+            account.eq_ignore_ascii_case(&credentials.email) && *to == folder
+        })
+        .map(|(_, uid, _)| *uid)
+        .collect();
+    generate_all(credentials)
+        .into_iter()
+        .filter(|g| moved.contains(&g.uid))
+        .collect()
+}
+
+/// The mailbox's Sent folder: what it sent through the fake mailbox, as a
+/// mail client reads it back, numbered in the order sent.
+fn sent_as_received(credentials: &MailCredentials) -> Vec<FullEmail> {
+    sent_messages(&credentials.email)
+        .iter()
+        .enumerate()
+        .filter_map(|(i, sent)| {
+            crate::imap_client::parse_message(i as u32 + 1, sent.raw.as_bytes(), None).ok()
+        })
+        .map(|email| FullEmail {
+            received: email.date,
+            ..email
+        })
+        .collect()
+}
+
+/// The one message in the Junk folder.
+fn junk(credentials: &MailCredentials) -> (EmailEnvelope, FullEmail) {
+    let received = Utc::now() - Duration::hours(3);
+    let email = FullEmail {
+        uid: 1,
+        subject: "You have won a prize!".into(),
+        from: vec![MailAddress::new(
+            Some("Prize Department"),
+            "winner@lottery.invalid",
+        )],
+        reply_to: vec![],
+        to: vec![MailAddress::new(None, &credentials.email)],
+        cc: vec![],
+        date: Some(received),
+        received: Some(received),
+        body_html: None,
+        body_text: Some("Claim your prize by sending your bank details.".into()),
+        // Spam often has none, and without one the reader offers no
+        // "Move to Inbox" that the fake could not carry out.
+        message_id: None,
+        references: vec![],
+        attachments: vec![],
+    };
+    let envelope = EmailEnvelope {
+        uid: 1,
+        subject: email.subject.clone(),
+        from: "Prize Department".into(),
+        date: email.date,
+        message_id: email.message_id.clone(),
+    };
+    (envelope, email)
+}
+
 /// A message's attachments as a mail server would hand them over: named
 /// safely, the way real messages are parsed.
 fn attachments(message: &FakeMessage) -> Vec<Attachment> {
@@ -399,6 +499,43 @@ impl MailFetcher for WithDemoMailbox {
             .await
     }
 
+    async fn list_folders(&self, credentials: &MailCredentials) -> AppResult<Vec<FolderInfo>> {
+        self.pick(credentials).list_folders(credentials).await
+    }
+
+    async fn fetch_folder(
+        &self,
+        credentials: &MailCredentials,
+        folder: Folder,
+    ) -> AppResult<Vec<EmailEnvelope>> {
+        self.pick(credentials)
+            .fetch_folder(credentials, folder)
+            .await
+    }
+
+    async fn fetch_folder_email(
+        &self,
+        credentials: &MailCredentials,
+        folder: Folder,
+        uid: u32,
+    ) -> AppResult<FullEmail> {
+        self.pick(credentials)
+            .fetch_folder_email(credentials, folder, uid)
+            .await
+    }
+
+    async fn fetch_folder_attachment(
+        &self,
+        credentials: &MailCredentials,
+        folder: Folder,
+        uid: u32,
+        index: usize,
+    ) -> AppResult<Attachment> {
+        self.pick(credentials)
+            .fetch_folder_attachment(credentials, folder, uid, index)
+            .await
+    }
+
     async fn search(
         &self,
         credentials: &MailCredentials,
@@ -504,41 +641,11 @@ impl MailFetcher for FakeMailFetcher {
     }
 
     async fn fetch_email(&self, credentials: &MailCredentials, uid: u32) -> AppResult<FullEmail> {
-        let generated = generate(credentials)
-            .into_iter()
+        generate(credentials)
+            .iter()
             .find(|g| g.uid == uid)
-            .ok_or_else(|| AppError::NotFound("Message not found".into()))?;
-        let message = generated.message;
-        Ok(FullEmail {
-            uid,
-            subject: message.subject.to_string(),
-            from: vec![MailAddress::new(
-                Some(&generated.sender_name),
-                message.from.1,
-            )],
-            reply_to: addresses(message.reply_to.as_slice()),
-            to: vec![MailAddress::new(None, &credentials.email)],
-            cc: addresses(message.cc),
-            date: Some(generated.sent()),
-            received: Some(generated.received),
-            body_html: message.text.is_none().then(|| {
-                format!(
-                    "<h2>{subject}</h2><p>This is a generated message from the demo mailbox.</p>\
-                     <ul><li>Sender: {name}</li><li>UID: {uid}</li></ul>\
-                     <p>Read more at <a href=\"https://example.com/\">example.com</a>.</p>",
-                    subject = message.subject,
-                    name = generated.sender_name,
-                )
-            }),
-            body_text: message.text.map(Into::into),
-            message_id: Some(message_id(uid)),
-            references: message.thread.iter().map(|id| id.to_string()).collect(),
-            attachments: attachments(message)
-                .iter()
-                .enumerate()
-                .map(|(index, attachment)| attachment.info(index))
-                .collect(),
-        })
+            .map(|g| full_email(credentials, g))
+            .ok_or_else(|| AppError::NotFound("Message not found".into()))
     }
 
     async fn fetch_attachment(
@@ -580,16 +687,93 @@ impl MailFetcher for FakeMailFetcher {
                 && message_id(*uid) == id
         });
         let Some(position) = position else {
-            let folder = match from {
-                Folder::Trash => "Trash",
-                Folder::Archive => "Archive",
-            };
             return Err(AppError::NotFound(format!(
-                "The message is no longer in {folder}"
+                "The message is no longer in {}",
+                from.label()
             )));
         };
         // A real server would give it a new UID; the fake keeps the old one.
         Ok(moved.remove(position).1)
+    }
+
+    async fn list_folders(&self, _credentials: &MailCredentials) -> AppResult<Vec<FolderInfo>> {
+        Ok(Folder::ALL
+            .iter()
+            .map(|&kind| FolderInfo {
+                kind,
+                name: kind.label().into(),
+            })
+            .collect())
+    }
+
+    async fn fetch_folder(
+        &self,
+        credentials: &MailCredentials,
+        folder: Folder,
+    ) -> AppResult<Vec<EmailEnvelope>> {
+        Ok(match folder {
+            Folder::Sent => sent_as_received(credentials)
+                .iter()
+                .rev()
+                .map(|email| EmailEnvelope {
+                    uid: email.uid,
+                    subject: email.subject.clone(),
+                    from: credentials.email.clone(),
+                    date: email.date,
+                    message_id: email.message_id.clone(),
+                })
+                .collect(),
+            Folder::Trash | Folder::Archive => moved_to(credentials, folder)
+                .iter()
+                .map(Generated::envelope)
+                .collect(),
+            Folder::Junk => vec![junk(credentials).0],
+            Folder::Drafts => Vec::new(),
+        })
+    }
+
+    async fn fetch_folder_email(
+        &self,
+        credentials: &MailCredentials,
+        folder: Folder,
+        uid: u32,
+    ) -> AppResult<FullEmail> {
+        let found = match folder {
+            Folder::Sent => sent_as_received(credentials)
+                .into_iter()
+                .find(|email| email.uid == uid),
+            Folder::Trash | Folder::Archive => moved_to(credentials, folder)
+                .iter()
+                .find(|g| g.uid == uid)
+                .map(|g| full_email(credentials, g)),
+            Folder::Junk => Some(junk(credentials).1).filter(|email| email.uid == uid),
+            Folder::Drafts => None,
+        };
+        found.ok_or_else(|| AppError::NotFound("Message not found".into()))
+    }
+
+    async fn fetch_folder_attachment(
+        &self,
+        credentials: &MailCredentials,
+        folder: Folder,
+        uid: u32,
+        index: usize,
+    ) -> AppResult<Attachment> {
+        match folder {
+            Folder::Sent => {
+                let sent = sent_messages(&credentials.email);
+                let raw = sent
+                    .get((uid as usize).wrapping_sub(1))
+                    .ok_or_else(|| AppError::NotFound("Message not found".into()))?;
+                crate::attachment::extract(raw.raw.as_bytes(), index)
+            }
+            Folder::Trash | Folder::Archive => moved_to(credentials, folder)
+                .iter()
+                .find(|g| g.uid == uid)
+                .and_then(|g| attachments(g.message).into_iter().nth(index))
+                .ok_or_else(|| AppError::NotFound("Attachment not found".into())),
+            Folder::Junk | Folder::Drafts => Err(AppError::NotFound("Attachment not found".into())),
+        }
     }
 
     async fn search(
@@ -925,6 +1109,7 @@ mod tests {
                 forward: Some(crate::outgoing::ForwardedAttachments {
                     uid: stripe,
                     indexes: vec![1],
+                    folder: None,
                 }),
                 ..Default::default()
             },
@@ -960,6 +1145,7 @@ mod tests {
                 forward: Some(crate::outgoing::ForwardedAttachments {
                     uid: stripe,
                     indexes: vec![5],
+                    folder: None,
                 }),
                 ..Default::default()
             },
@@ -968,6 +1154,28 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, AppError::NotFound(_)));
         assert_eq!(sent_messages("forwarder@example.com").len(), 1);
+
+        // Forwarding from a server folder takes the attachment from that
+        // folder's message, not the inbox message with the same UID.
+        mailbox::send(
+            &db,
+            &FakeMailFetcher,
+            "u",
+            &account,
+            crate::outgoing::SendRequest {
+                to: vec![MailAddress::new(None, "someone@acme.example")],
+                forward: Some(crate::outgoing::ForwardedAttachments {
+                    uid: 1,
+                    indexes: vec![0],
+                    folder: Some(Folder::Sent),
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let sent = sent_messages("forwarder@example.com");
+        assert_eq!(sent[1].attachments, sent[0].attachments);
     }
 
     #[tokio::test]
@@ -1053,6 +1261,86 @@ mod tests {
         assert_eq!(again.to_string(), "The message is no longer in Trash");
         assert!(
             mailbox::restore_email(&FakeMailFetcher, &account, Folder::Trash, " <> ")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn server_folders_show_what_was_sent_moved_and_filtered() {
+        let db = db().await;
+        let account = connected("folders@example.com");
+        mailbox::send(
+            &db,
+            &FakeMailFetcher,
+            "u",
+            &account,
+            crate::outgoing::SendRequest {
+                to: vec![MailAddress::new(Some("Sarah"), "sarah@acme.example")],
+                subject: "Sent one".into(),
+                attachments: vec![crate::outgoing::AttachmentUpload {
+                    filename: "a.txt".into(),
+                    content_type: None,
+                    data: base64::engine::general_purpose::STANDARD.encode("hi"),
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        mailbox::move_email(&db, &FakeMailFetcher, &account, 997, Folder::Trash)
+            .await
+            .unwrap();
+
+        let kinds: Vec<_> = mailbox::list_folders(&FakeMailFetcher, &account)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|f| f.kind)
+            .collect();
+        assert_eq!(kinds, Folder::ALL);
+
+        let sent = mailbox::folder_emails(&FakeMailFetcher, &account, Folder::Sent)
+            .await
+            .unwrap();
+        assert_eq!(sent[0].subject, "Sent one");
+        let read = mailbox::get_folder_email(&FakeMailFetcher, &account, Folder::Sent, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            read.to,
+            [MailAddress::new(Some("Sarah"), "sarah@acme.example")]
+        );
+        let file = mailbox::get_folder_attachment(&FakeMailFetcher, &account, Folder::Sent, 1, 0)
+            .await
+            .unwrap();
+        assert_eq!(file.data, b"hi");
+
+        let trash = mailbox::folder_emails(&FakeMailFetcher, &account, Folder::Trash)
+            .await
+            .unwrap();
+        assert_eq!(trash.iter().map(|e| e.uid).collect::<Vec<_>>(), [997]);
+        assert!(
+            mailbox::get_folder_email(&FakeMailFetcher, &account, Folder::Archive, 997)
+                .await
+                .is_err(),
+            "it is in Trash, not the archive"
+        );
+        let junk = mailbox::folder_emails(&FakeMailFetcher, &account, Folder::Junk)
+            .await
+            .unwrap();
+        assert_eq!(junk[0].subject, "You have won a prize!");
+
+        // Only Trash and the archive take moves; Sent and Drafts give none back.
+        for folder in [Folder::Sent, Folder::Drafts, Folder::Junk] {
+            assert!(
+                mailbox::move_email(&db, &FakeMailFetcher, &account, 996, folder)
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(
+            mailbox::restore_email(&FakeMailFetcher, &account, Folder::Sent, "x@y")
                 .await
                 .is_err()
         );

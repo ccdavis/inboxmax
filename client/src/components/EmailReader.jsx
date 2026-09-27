@@ -6,6 +6,7 @@ import { formatFullDate } from '../utils/dates';
 import { sameMailboxes } from '../utils/addresses';
 import { hasOtherRecipients } from '../utils/replies';
 import { formatSize } from '../utils/files';
+import { canMoveToInbox, folderLabel } from '../utils/folders';
 import { ArchiveIcon, TrashIcon } from './icons';
 
 function sanitizeEmailHtml(html) {
@@ -123,7 +124,7 @@ export function MessageHeaders({ email }) {
  * The message's attachments, each downloadable. The desktop app saves into
  * Downloads and says where, with a way to show the file.
  */
-function AttachmentList({ accountId, uid, attachments }) {
+function AttachmentList({ accountId, folder, uid, attachments }) {
   const [saved, setSaved] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(null);
@@ -133,7 +134,9 @@ function AttachmentList({ accountId, uid, attachments }) {
     setError(null);
     setBusy(attachment.index);
     try {
-      setSaved(await api.downloadAttachment(accountId, uid, attachment.index));
+      setSaved(await (folder
+        ? api.downloadFolderAttachment(accountId, folder, uid, attachment.index)
+        : api.downloadAttachment(accountId, uid, attachment.index)));
     } catch (caught) {
       setError(`Could not download ${attachment.filename}: ${caught.message}`);
     } finally {
@@ -205,33 +208,41 @@ function BackButton({ onBack, children }) {
  * offers the reply actions; `me` is the mailbox's own address, so Reply all
  * appears only when it would reach someone besides the sender.
  * `onMove(email, 'archive' | 'trash')` offers Archive and Delete.
+ *
+ * With `folder` ({ kind, name }) the message is one in that server folder,
+ * read without marking it read; `onMoveToInbox(email)` offers to put it back.
  */
-export default function EmailReader({ accountId, emailUid, onBack, me, onReply, onMove }) {
-  const [request, setRequest] = useState({ uid: null, email: null, error: null });
+export default function EmailReader({ accountId, emailUid, folder, onBack, me, onReply, onMove, onMoveToInbox }) {
+  const [request, setRequest] = useState({ key: null, email: null, error: null });
   const headingRef = useRef(null);
+  const folderKind = folder?.kind ?? null;
+  // UIDs are only unique within one folder.
+  const key = `${folderKind ?? 'inbox'}|${emailUid}`;
 
   useEffect(() => {
     let cancelled = false;
-    api
-      .getEmail(accountId, emailUid)
+    const fetched = folderKind
+      ? api.getFolderEmail(accountId, folderKind, emailUid)
+      : api.getEmail(accountId, emailUid);
+    fetched
       .then((data) => {
-        if (!cancelled) setRequest({ uid: emailUid, email: data, error: null });
+        if (!cancelled) setRequest({ key, email: data, error: null });
       })
       .catch((e) => {
-        if (!cancelled) setRequest({ uid: emailUid, email: null, error: e.message });
+        if (!cancelled) setRequest({ key, email: null, error: e.message });
       });
     return () => {
       cancelled = true;
     };
-  }, [accountId, emailUid]);
+  }, [accountId, emailUid, folderKind, key]);
 
-  const loaded = request.uid === emailUid && request.email;
+  const loaded = request.key === key && request.email;
   // Announce the newly opened message to screen readers and keyboard users.
   useEffect(() => {
     if (loaded) headingRef.current?.focus();
   }, [loaded]);
 
-  if (request.uid !== emailUid) {
+  if (request.key !== key) {
     return (
       <div className="flex items-center justify-center h-full">
         <Spinner label="Loading email" />
@@ -270,7 +281,7 @@ export default function EmailReader({ accountId, emailUid, onBack, me, onReply, 
     <article className="flex flex-col h-full">
       <header className="px-4 py-3 border-b border-line bg-canvas shrink-0">
         <div className="mb-3">
-          <BackButton onBack={onBack}>Back to inbox</BackButton>
+          <BackButton onBack={onBack}>{folder ? `Back to ${folderLabel(folder.kind)}` : 'Back to inbox'}</BackButton>
         </div>
         <h1
           ref={headingRef}
@@ -280,7 +291,13 @@ export default function EmailReader({ accountId, emailUid, onBack, me, onReply, 
           {email.subject || '(no subject)'}
         </h1>
         <MessageHeaders email={email} />
-        <AttachmentList key={email.uid} accountId={accountId} uid={email.uid} attachments={email.attachments} />
+        <AttachmentList
+          key={email.uid}
+          accountId={accountId}
+          folder={folder?.kind}
+          uid={email.uid}
+          attachments={email.attachments}
+        />
         {onReply && (
           <div className="mt-3 flex flex-wrap gap-2">
             <ActionButton icon="↩" onClick={() => onReply('reply', email)}>Reply</ActionButton>
@@ -293,6 +310,10 @@ export default function EmailReader({ accountId, emailUid, onBack, me, onReply, 
                 <ActionButton icon={<ArchiveIcon />} onClick={() => onMove(email, 'archive')}>Archive</ActionButton>
                 <ActionButton icon={<TrashIcon />} onClick={() => onMove(email, 'trash')}>Delete</ActionButton>
               </>
+            )}
+            {/* Putting it back finds the message by its Message-ID. */}
+            {onMoveToInbox && folderKind && canMoveToInbox(folderKind) && email.message_id && (
+              <ActionButton icon="⤴" onClick={() => onMoveToInbox(email)}>Move to Inbox</ActionButton>
             )}
           </div>
         )}

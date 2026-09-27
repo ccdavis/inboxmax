@@ -8,7 +8,7 @@ use inboxmax_core::account::{self, AccountStatus, ConnectRequest, ConnectRespons
 use inboxmax_core::contacts::{self, Contact, ContactRequest};
 use inboxmax_core::drafts::{self, Draft, DraftSummary};
 use inboxmax_core::fake_mail::{self, DEMO_EMAIL, DEMO_HOST, DEMO_PASSWORD};
-use inboxmax_core::imap_client::{EmailEnvelope, Folder, FullEmail};
+use inboxmax_core::imap_client::{EmailEnvelope, Folder, FolderInfo, FullEmail};
 use inboxmax_core::mailbox::{self, EmailListResponse, RememberRequest, RememberedEmail, Restored};
 use inboxmax_core::outgoing::{SendReceipt, SendRequest};
 use inboxmax_core::{AppError, AppResult};
@@ -158,6 +158,36 @@ pub async fn send_email(
 }
 
 #[tauri::command]
+pub async fn list_folders(
+    state: State<'_, DesktopState>,
+    account_id: String,
+) -> AppResult<Vec<FolderInfo>> {
+    let account = state.require_account(&account_id).await?;
+    mailbox::list_folders(state.mail.as_ref(), &account).await
+}
+
+#[tauri::command]
+pub async fn list_folder_emails(
+    state: State<'_, DesktopState>,
+    account_id: String,
+    folder: Folder,
+) -> AppResult<Vec<EmailEnvelope>> {
+    let account = state.require_account(&account_id).await?;
+    mailbox::folder_emails(state.mail.as_ref(), &account, folder).await
+}
+
+#[tauri::command]
+pub async fn get_folder_email(
+    state: State<'_, DesktopState>,
+    account_id: String,
+    folder: Folder,
+    uid: i64,
+) -> AppResult<FullEmail> {
+    let account = state.require_account(&account_id).await?;
+    mailbox::get_folder_email(state.mail.as_ref(), &account, folder, uid).await
+}
+
+#[tauri::command]
 pub async fn list_drafts(
     state: State<'_, DesktopState>,
     account_id: String,
@@ -249,8 +279,31 @@ pub async fn save_attachment(
 ) -> AppResult<SavedFile> {
     let account = state.require_account(&account_id).await?;
     let attachment = mailbox::get_attachment(state.mail.as_ref(), &account, uid, index).await?;
+    save_to_downloads(&app, attachment).await
+}
+
+/// Save an attachment from a message in one of the server's folders.
+#[tauri::command]
+pub async fn save_folder_attachment(
+    app: tauri::AppHandle,
+    state: State<'_, DesktopState>,
+    account_id: String,
+    folder: Folder,
+    uid: i64,
+    index: usize,
+) -> AppResult<SavedFile> {
+    let account = state.require_account(&account_id).await?;
+    let attachment =
+        mailbox::get_folder_attachment(state.mail.as_ref(), &account, folder, uid, index).await?;
+    save_to_downloads(&app, attachment).await
+}
+
+async fn save_to_downloads(
+    app: &tauri::AppHandle,
+    attachment: inboxmax_core::attachment::Attachment,
+) -> AppResult<SavedFile> {
     let path =
-        downloads::save_new(&download_dir(&app)?, &attachment.filename, &attachment.data).await?;
+        downloads::save_new(&download_dir(app)?, &attachment.filename, &attachment.data).await?;
     Ok(SavedFile {
         filename: path
             .file_name()

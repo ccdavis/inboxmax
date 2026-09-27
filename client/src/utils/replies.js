@@ -114,8 +114,9 @@ export function hasOtherRecipients(email, { me }) {
 /**
  * A forward: the original's headers in full, then its text, with its
  * attachments to send along (fetched by the server from the original).
+ * `folder` is the server folder the message is in, if not the inbox.
  */
-export function forwardDraft(email) {
+export function forwardDraft(email, { folder = null } = {}) {
   const header = [
     '---------- Forwarded message ----------',
     `From: ${addressList(email.from)}`,
@@ -133,6 +134,7 @@ export function forwardDraft(email) {
     references: [],
     attachments: email.attachments ?? [],
     forward_uid: email.uid,
+    forward_folder: folder,
     focus: 'to',
   };
 }

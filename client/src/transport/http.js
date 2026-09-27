@@ -26,6 +26,18 @@ async function request(path, options = {}) {
 
 const json = (method, body) => ({ method, body: JSON.stringify(body) });
 const account = (accountId) => `/api/accounts/${encodeURIComponent(accountId)}`;
+const folderPath = (accountId, folder) => `${account(accountId)}/folders/${encodeURIComponent(folder)}`;
+
+/** Download by following a link; the server sends it as a download. */
+function follow(href) {
+  const link = document.createElement('a');
+  link.href = href;
+  link.download = '';
+  document.body.append(link);
+  link.click();
+  link.remove();
+  return Promise.resolve(null);
+}
 
 export const transport = {
   isDesktop: false,
@@ -61,6 +73,10 @@ export const transport = {
     request(`${account(accountId)}/drafts/${encodeURIComponent(draftId)}`, json('PUT', { content })),
   deleteDraft: (accountId, draftId) =>
     request(`${account(accountId)}/drafts/${encodeURIComponent(draftId)}`, { method: 'DELETE' }),
+  listFolders: (accountId) => request(`${account(accountId)}/folders`),
+  getFolderEmails: (accountId, folder) => request(`${folderPath(accountId, folder)}/emails`),
+  getFolderEmail: (accountId, folder, uid) =>
+    request(`${folderPath(accountId, folder)}/emails/${encodeURIComponent(uid)}`),
   moveEmail: (accountId, uid, to) => request(`${account(accountId)}/emails/${encodeURIComponent(uid)}/move`, json('POST', { to })),
   restoreEmail: (accountId, from, messageId) => request(`${account(accountId)}/restore`, json('POST', { from, message_id: messageId })),
 
@@ -75,15 +91,10 @@ export const transport = {
 
   // The server sends attachments as downloads, so following the link saves
   // the file without leaving the page.
-  downloadAttachment: (accountId, uid, index) => {
-    const link = document.createElement('a');
-    link.href = `${account(accountId)}/emails/${encodeURIComponent(uid)}/attachments/${encodeURIComponent(index)}`;
-    link.download = '';
-    document.body.append(link);
-    link.click();
-    link.remove();
-    return Promise.resolve(null);
-  },
+  downloadAttachment: (accountId, uid, index) =>
+    follow(`${account(accountId)}/emails/${encodeURIComponent(uid)}/attachments/${encodeURIComponent(index)}`),
+  downloadFolderAttachment: (accountId, folder, uid, index) =>
+    follow(`${folderPath(accountId, folder)}/emails/${encodeURIComponent(uid)}/attachments/${encodeURIComponent(index)}`),
   showInFolder: () => Promise.reject(new ApiError(400, 'Not available in the web app')),
 
   // Links in emails carry target="_blank", so the browser opens them itself.

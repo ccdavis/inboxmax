@@ -87,8 +87,11 @@ describe('forwardDraft', () => {
   it('carries the original attachments to send along', () => {
     const invoice = { index: 0, filename: 'invoice.pdf', content_type: 'application/pdf', size: 9 };
     expect(forwardDraft(message({ uid: 42, attachments: [invoice] })))
-      .toMatchObject({ attachments: [invoice], forward_uid: 42 });
+      .toMatchObject({ attachments: [invoice], forward_uid: 42, forward_folder: null });
     expect(forwardDraft(message()).attachments).toEqual([]);
+    // From a server folder, the attachments are fetched from there.
+    expect(forwardDraft(message({ uid: 3 }), { folder: 'sent' }))
+      .toMatchObject({ forward_uid: 3, forward_folder: 'sent' });
   });
 
   it('carries the original headers in full and the text, with no recipients or threading', () => {

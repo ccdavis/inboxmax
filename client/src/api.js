@@ -35,6 +35,15 @@ export const getDraft = (accountId, draftId) => transport.getDraft(accountId, dr
 export const saveDraft = (accountId, draftId, content) => transport.saveDraft(accountId, draftId, content);
 export const deleteDraft = (accountId, draftId) => transport.deleteDraft(accountId, draftId);
 
+// The server's own folders, read-only: [{ kind, name }], where `kind` is
+// 'sent', 'drafts', 'archive', 'trash' or 'junk' and `name` is what the
+// server calls it. Looking through a folder never marks its mail read.
+export const listFolders = (accountId) => transport.listFolders(accountId);
+export const getFolderEmails = (accountId, folder) => transport.getFolderEmails(accountId, folder);
+export const getFolderEmail = (accountId, folder, uid) => transport.getFolderEmail(accountId, folder, uid);
+export const downloadFolderAttachment = (accountId, folder, uid, index) =>
+  transport.downloadFolderAttachment(accountId, folder, uid, index);
+
 /** Move a message out of the inbox: `to` is 'trash' or 'archive'. */
 export const moveEmail = (accountId, uid, to) => transport.moveEmail(accountId, uid, to);
 /** Undo a move, finding the message by its Message-ID. Resolves to { uid } in the inbox. */

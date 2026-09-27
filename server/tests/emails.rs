@@ -8,8 +8,8 @@ use inboxmax_core::attachment::Attachment;
 use inboxmax_core::outgoing::{OutgoingEmail, SendReceipt};
 use inboxmax_server::error::{AppError, AppResult};
 use inboxmax_server::imap_client::{
-    EmailEnvelope, FullEmail, MailAddress, MailCredentials, MailFetcher, MailboxSnapshot,
-    SmtpServer,
+    EmailEnvelope, Folder, FolderInfo, FullEmail, MailAddress, MailCredentials, MailFetcher,
+    MailboxSnapshot, SmtpServer,
 };
 use inboxmax_server::rate_limit::AttemptLimiter;
 use inboxmax_server::session::{SessionStore, UserSession};
@@ -118,6 +118,53 @@ impl MailFetcher for MockMailFetcher {
 
     async fn verify_credentials(&self, _credentials: &MailCredentials) -> AppResult<()> {
         Ok(())
+    }
+
+    async fn list_folders(&self, _credentials: &MailCredentials) -> AppResult<Vec<FolderInfo>> {
+        Ok(vec![
+            FolderInfo {
+                kind: Folder::Sent,
+                name: "Sent Items".into(),
+            },
+            FolderInfo {
+                kind: Folder::Junk,
+                name: "Spam".into(),
+            },
+        ])
+    }
+
+    async fn fetch_folder(
+        &self,
+        _credentials: &MailCredentials,
+        folder: Folder,
+    ) -> AppResult<Vec<EmailEnvelope>> {
+        match folder {
+            Folder::Junk => Ok(self.envelopes.clone()),
+            _ => Err(AppError::NotFound(
+                "The mail server has no such folder".into(),
+            )),
+        }
+    }
+
+    async fn fetch_folder_email(
+        &self,
+        credentials: &MailCredentials,
+        folder: Folder,
+        uid: u32,
+    ) -> AppResult<FullEmail> {
+        self.fetch_folder(credentials, folder).await?;
+        self.fetch_email(credentials, uid).await
+    }
+
+    async fn fetch_folder_attachment(
+        &self,
+        credentials: &MailCredentials,
+        folder: Folder,
+        uid: u32,
+        index: usize,
+    ) -> AppResult<Attachment> {
+        self.fetch_folder(credentials, folder).await?;
+        self.fetch_attachment(credentials, uid, index).await
     }
 }
 
@@ -613,6 +660,74 @@ async fn missing_message_returns_not_found() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn server_folders_can_be_listed_and_read() {
+    let app = build_app(build_state(sample_envelopes()).await);
+    let get = |uri: String| app.clone().oneshot(emails_request(&uri));
+
+    let folders = parse_response(
+        get(format!("/api/accounts/{ACCOUNT_ID}/folders"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(folders[0]["kind"], "sent");
+    assert_eq!(folders[1]["kind"], "junk");
+    assert_eq!(folders[1]["name"], "Spam");
+
+    let junk = get(format!("/api/accounts/{ACCOUNT_ID}/folders/junk/emails"))
+        .await
+        .unwrap();
+    assert_eq!(junk.status(), StatusCode::OK);
+    assert_eq!(
+        parse_response(junk).await.as_array().unwrap().len(),
+        sample_envelopes().len()
+    );
+
+    let email = get(format!(
+        "/api/accounts/{ACCOUNT_ID}/folders/junk/emails/100"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(parse_response(email).await["uid"], 100);
+
+    let attachment = get(format!(
+        "/api/accounts/{ACCOUNT_ID}/folders/junk/emails/100/attachments/0"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(attachment.status(), StatusCode::OK);
+    assert!(
+        attachment.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .starts_with("attachment")
+    );
+    assert_eq!(attachment.headers()["content-security-policy"], "sandbox");
+
+    // A folder the server lacks, and one that is not a folder at all.
+    let missing = get(format!("/api/accounts/{ACCOUNT_ID}/folders/trash/emails"))
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    let bogus = get(format!("/api/accounts/{ACCOUNT_ID}/folders/INBOX/emails"))
+        .await
+        .unwrap();
+    assert!(bogus.status().is_client_error());
+}
+
+#[tokio::test]
+async fn server_folders_need_a_connected_account() {
+    let app = build_app(build_state(sample_envelopes()).await);
+    let response = app
+        .oneshot(emails_request(
+            "/api/accounts/someone-else/folders/junk/emails",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 // ---------------------------------------------------------------------------

@@ -120,6 +120,7 @@ export default function ComposeDialog({
       filename, content_type, size, data, index,
     })),
     forward_uid: initial.forward_uid ?? null,
+    forward_folder: initial.forward_folder ?? null,
   });
   const contentRef = useRef(content);
   contentRef.current = content;
@@ -255,7 +256,11 @@ export default function ComposeDialog({
         .filter((f) => f.data)
         .map(({ filename, content_type, data }) => ({ filename, content_type, data })),
       forward: files.some((f) => f.data == null)
-        ? { uid: initial.forward_uid, indexes: files.filter((f) => f.data == null).map((f) => f.index) }
+        ? {
+          uid: initial.forward_uid,
+          indexes: files.filter((f) => f.data == null).map((f) => f.index),
+          folder: initial.forward_folder ?? null,
+        }
         : null,
       draft_id: draftId,
     };

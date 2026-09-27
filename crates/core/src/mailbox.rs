@@ -5,7 +5,7 @@
 use crate::account::ConnectedAccount;
 use crate::attachment::Attachment;
 use crate::error::{AppError, AppResult};
-use crate::imap_client::{EmailEnvelope, Folder, FullEmail, MailAddress, MailFetcher};
+use crate::imap_client::{EmailEnvelope, Folder, FolderInfo, FullEmail, MailAddress, MailFetcher};
 use crate::outgoing::{OutgoingEmail, SendReceipt, SendRequest};
 use crate::{contacts, drafts};
 use chrono::Utc;
@@ -199,6 +199,12 @@ pub async fn move_email(
     to: Folder,
 ) -> AppResult<()> {
     let checked = validate_uid(uid)?;
+    if !to.accepts_moves() {
+        return Err(AppError::BadRequest(format!(
+            "Mail cannot be moved to {}",
+            to.label()
+        )));
+    }
     mail.move_message(&account.mail_credentials(), checked, to)
         .await?;
     if let Err(e) = forget(db, &account.id, uid).await {
@@ -214,6 +220,12 @@ pub async fn restore_email(
     from: Folder,
     message_id: &str,
 ) -> AppResult<Restored> {
+    if matches!(from, Folder::Sent | Folder::Drafts) {
+        return Err(AppError::BadRequest(format!(
+            "Mail in {} cannot be moved to the inbox",
+            from.label()
+        )));
+    }
     let message_id = message_id
         .trim()
         .trim_start_matches('<')
@@ -227,6 +239,47 @@ pub async fn restore_email(
         .restore_message(&account.mail_credentials(), from, message_id)
         .await?;
     Ok(Restored { uid })
+}
+
+/// The server folders the mailbox has, besides the inbox.
+pub async fn list_folders(
+    mail: &dyn MailFetcher,
+    account: &ConnectedAccount,
+) -> AppResult<Vec<FolderInfo>> {
+    mail.list_folders(&account.mail_credentials()).await
+}
+
+/// The newest messages in a server folder.
+pub async fn folder_emails(
+    mail: &dyn MailFetcher,
+    account: &ConnectedAccount,
+    folder: Folder,
+) -> AppResult<Vec<EmailEnvelope>> {
+    mail.fetch_folder(&account.mail_credentials(), folder).await
+}
+
+/// A message in a server folder, left unread on the server.
+pub async fn get_folder_email(
+    mail: &dyn MailFetcher,
+    account: &ConnectedAccount,
+    folder: Folder,
+    uid: i64,
+) -> AppResult<FullEmail> {
+    let uid = validate_uid(uid)?;
+    mail.fetch_folder_email(&account.mail_credentials(), folder, uid)
+        .await
+}
+
+pub async fn get_folder_attachment(
+    mail: &dyn MailFetcher,
+    account: &ConnectedAccount,
+    folder: Folder,
+    uid: i64,
+    index: usize,
+) -> AppResult<Attachment> {
+    let uid = validate_uid(uid)?;
+    mail.fetch_folder_attachment(&account.mail_credentials(), folder, uid, index)
+        .await
 }
 
 /// One attachment of a message, by its position among the attachments.
@@ -269,11 +322,15 @@ pub async fn send(
     if let Some(forward) = forward {
         let uid = validate_uid(forward.uid)?;
         let mut originals = Vec::with_capacity(forward.indexes.len());
+        let credentials = account.mail_credentials();
         for index in forward.indexes {
-            originals.push(
-                mail.fetch_attachment(&account.mail_credentials(), uid, index)
-                    .await?,
-            );
+            originals.push(match forward.folder {
+                Some(folder) => {
+                    mail.fetch_folder_attachment(&credentials, folder, uid, index)
+                        .await?
+                }
+                None => mail.fetch_attachment(&credentials, uid, index).await?,
+            });
         }
         email.attach(originals)?;
     }

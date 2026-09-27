@@ -4,7 +4,7 @@
 use crate::account::normalize_email;
 use crate::attachment::{Attachment, safe_filename};
 use crate::error::{AppError, AppResult};
-use crate::imap_client::MailAddress;
+use crate::imap_client::{Folder, MailAddress};
 use base64::Engine;
 use lettre::Message;
 use lettre::message::header::ContentType;
@@ -35,6 +35,9 @@ pub struct AttachmentUpload {
 pub struct ForwardedAttachments {
     pub uid: i64,
     pub indexes: Vec<usize>,
+    /// The server folder the message is in; none for the inbox.
+    #[serde(default)]
+    pub folder: Option<Folder>,
 }
 
 /// What the compose form sends.
